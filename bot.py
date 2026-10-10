@@ -1,9 +1,9 @@
 import os
 import logging
 import threading
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
@@ -198,8 +198,9 @@ async def notify_user(context, user_id, warning_count, reason, group_name):
             )
         elif warning_count >= 3:
             msg += (
-                "⛔ *You have been banned from the group.*\n"
-                "You reached 3 warnings."
+                "🔇 *You have been muted for 24 hours.*\n"
+                "You reached 3 warnings.\n\n"
+                "You can read messages but cannot send for 24 hours."
             )
         await context.bot.send_message(user_id, msg, parse_mode="Markdown")
     except Exception:
@@ -220,44 +221,54 @@ async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_banned, reason = contains_banned_content(text)
 
     if has_banned:
-        # Delete the message
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
+        # Get user info BEFORE deleting
+        username = update.message.from_user.first_name
 
         # Warn the user
         data = get_group(chat_id)
         current_warnings = data["warnings"].get(user_id, 0) + 1
         data["warnings"][user_id] = current_warnings
 
-        username = update.message.from_user.first_name
-
         # Send DM notification to user
         await notify_user(context, user_id, current_warnings, reason, group_name)
 
+        # Send warning message FIRST (before delete)
         if current_warnings >= 3:
-            # Ban the user
+            # Mute the user for 24 hours (suspend)
             try:
-                await context.bot.ban_chat_member(chat_id, user_id)
-                await update.message.reply_text(
-                    f"⛔ {username} has been banned (3 warnings reached).\n"
+                until_date = datetime.now() + timedelta(hours=24)
+                await context.bot.restrict_chat_member(
+                    chat_id, user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until_date
+                )
+                await context.bot.send_message(
+                    chat_id,
+                    f"🔇 {username} has been muted for 24 hours (3 warnings reached).\n"
                     f"Reason: {reason}",
                     parse_mode="Markdown"
                 )
             except Exception:
-                await update.message.reply_text(
-                    f"⚠️ {username} reached 3 warnings but I couldn't ban them. "
-                    f"Please ban manually.",
+                await context.bot.send_message(
+                    chat_id,
+                    f"⚠️ {username} reached 3 warnings but I couldn't mute them.",
                     parse_mode="Markdown"
                 )
         else:
-            await update.message.reply_text(
+            await context.bot.send_message(
+                chat_id,
                 f"⚠️ {username}, your message was removed.\n"
-                f"Reason: {reason}\n"
-                f"Warning {current_warnings}/3",
+                f"📋 Reason: {reason}\n"
+                f"⚠️ Warning: {current_warnings}/3\n\n"
+                f"Next violation = longer mute. 3 warnings = 24h mute.",
                 parse_mode="Markdown"
             )
+
+        # Delete the message AFTER sending warning
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check photos for NSFW (simplified - checks caption)."""
@@ -271,31 +282,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_banned, reason = contains_banned_content(caption)
 
     if has_banned:
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-
         data = get_group(chat_id)
         current_warnings = data["warnings"].get(user_id, 0) + 1
         data["warnings"][user_id] = current_warnings
         group_name = update.message.chat.title or "the group"
+        username = update.message.from_user.first_name
 
         # Send DM notification
         await notify_user(context, user_id, current_warnings, reason, group_name)
 
+        # Send warning FIRST
         if current_warnings >= 3:
             try:
-                await context.bot.ban_chat_member(chat_id, user_id)
-                await update.message.reply_text(
-                    f"⛔ User banned (3 warnings). Reason: {reason}"
+                until_date = datetime.now() + timedelta(hours=24)
+                await context.bot.restrict_chat_member(
+                    chat_id, user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until_date
+                )
+                await context.bot.send_message(
+                    chat_id,
+                    f"🔇 {username} muted for 24 hours (3 warnings). Reason: {reason}"
                 )
             except Exception:
                 pass
         else:
-            await update.message.reply_text(
-                f"⚠️ Photo removed. Reason: {reason}. Warning {current_warnings}/3"
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ {username}, photo removed.\n📋 Reason: {reason}\n⚠️ Warning: {current_warnings}/3"
             )
+
+        # Delete AFTER
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
 
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check stickers for inappropriate content."""
@@ -313,31 +334,41 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_name = (sticker.set_name or "").lower()
     for keyword in BANNED_STICKER_KEYWORDS:
         if keyword in set_name:
-            try:
-                await update.message.delete()
-            except Exception:
-                pass
-
             data = get_group(chat_id)
             current_warnings = data["warnings"].get(user_id, 0) + 1
             data["warnings"][user_id] = current_warnings
             group_name = update.message.chat.title or "the group"
+            username = update.message.from_user.first_name
 
             # Send DM notification
             await notify_user(context, user_id, current_warnings, "inappropriate sticker", group_name)
 
+            # Send warning FIRST
             if current_warnings >= 3:
                 try:
-                    await context.bot.ban_chat_member(chat_id, user_id)
-                    await update.message.reply_text(
-                        f"⛔ User banned (3 warnings). Reason: inappropriate sticker"
+                    until_date = datetime.now() + timedelta(hours=24)
+                    await context.bot.restrict_chat_member(
+                        chat_id, user_id,
+                        permissions=ChatPermissions(can_send_messages=False),
+                        until_date=until_date
+                    )
+                    await context.bot.send_message(
+                        chat_id,
+                        f"🔇 {username} muted for 24 hours (3 warnings). Reason: inappropriate sticker"
                     )
                 except Exception:
                     pass
             else:
-                await update.message.reply_text(
-                    f"⚠️ Sticker removed. Warning {current_warnings}/3"
+                await context.bot.send_message(
+                    chat_id,
+                    f"⚠️ {username}, sticker removed.\n📋 Reason: inappropriate sticker\n⚠️ Warning: {current_warnings}/3"
                 )
+
+            # Delete AFTER
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
             return
 
     # Check if sticker is animated/video type (often NSFW)
