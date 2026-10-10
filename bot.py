@@ -7,7 +7,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8935044068:AAHs4VKBBMBOeHosaQwnjp-FE_H2hWeG8Wc")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "6416848944"))
 
 logging.basicConfig(level=logging.INFO)
