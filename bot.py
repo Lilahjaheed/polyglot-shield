@@ -173,11 +173,44 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
+async def notify_user(context, user_id, warning_count, reason, group_name):
+    """Send a DM to the user explaining their warning."""
+    try:
+        msg = (
+            f"⚠️ *Warning from {group_name}*\n\n"
+            f"Your message was removed because it violated group rules.\n\n"
+            f"*Reason:* {reason}\n"
+            f"*Warning:* {warning_count}/3\n\n"
+        )
+        if warning_count == 1:
+            msg += (
+                "*Rules reminder:*\n"
+                "• No porn or sexual content\n"
+                "• No insults or offensive language\n"
+                "• No spam or scams\n"
+                "• Respect everyone\n\n"
+                "You have 2 more warnings before being banned."
+            )
+        elif warning_count == 2:
+            msg += (
+                "⚠️ *You have 1 warning left!*\n"
+                "Next violation = permanent ban from the group."
+            )
+        elif warning_count >= 3:
+            msg += (
+                "⛔ *You have been banned from the group.*\n"
+                "You reached 3 warnings."
+            )
+        await context.bot.send_message(user_id, msg, parse_mode="Markdown")
+    except Exception:
+        pass  # User might have blocked the bot
+
 async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Moderate messages for banned content."""
     chat_id = update.message.chat.id
     user_id = update.message.from_user.id
     text = update.message.text
+    group_name = update.message.chat.title or "the group"
 
     # Skip admins
     if is_admin(user_id, chat_id, context):
@@ -199,6 +232,9 @@ async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["warnings"][user_id] = current_warnings
 
         username = update.message.from_user.first_name
+
+        # Send DM notification to user
+        await notify_user(context, user_id, current_warnings, reason, group_name)
 
         if current_warnings >= 3:
             # Ban the user
@@ -243,6 +279,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_group(chat_id)
         current_warnings = data["warnings"].get(user_id, 0) + 1
         data["warnings"][user_id] = current_warnings
+        group_name = update.message.chat.title or "the group"
+
+        # Send DM notification
+        await notify_user(context, user_id, current_warnings, reason, group_name)
 
         if current_warnings >= 3:
             try:
@@ -281,6 +321,10 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data = get_group(chat_id)
             current_warnings = data["warnings"].get(user_id, 0) + 1
             data["warnings"][user_id] = current_warnings
+            group_name = update.message.chat.title or "the group"
+
+            # Send DM notification
+            await notify_user(context, user_id, current_warnings, "inappropriate sticker", group_name)
 
             if current_warnings >= 3:
                 try:
