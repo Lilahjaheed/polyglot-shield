@@ -587,7 +587,7 @@ def main():
     # Content moderation
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderate_content))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.STICKER, handle_sticker))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
 
     threading.Thread(target=run_health_server, daemon=True).start()
 
