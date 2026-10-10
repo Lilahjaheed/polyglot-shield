@@ -20,19 +20,29 @@ logger = logging.getLogger(__name__)
 BANNED_WORDS = [
     # Insults / offensive (English)
     "idiot", "stupid", "dumb", "shut up", "shutup", "loser", "trash",
-    "damn", "hell", "crap", "wtf", "stfu", "f off", "f***",
+    "damn", "hell", "crap", "wtf", "stfu", "f off", "f***", "fck",
+    "fuck", "fucking", "fucked", "bullshit", "bitch", "asshole",
+    "bastard", "moron", "retard", "pathetic", "worthless", "disgusting",
+    "shut the fuck up", "you suck", "screw you", "go to hell",
+    "kill yourself", "kys", "i hate you",
     # Sexual / porn
     "sex", "porn", "nude", "naked", "xxx", "nsfw", "onlyfans",
-    "hookup", "sugar daddy", "sugar mommy",
+    "hookup", "sugar daddy", "sugar mommy", "sexy", "horny",
+    "erotic", "fetish", "orgasm", "masturbate", "dick", "cock",
+    "pussy", "boobs", "tits", "cum", "slut", "whore",
     # Scam / spam
     "free money", "click here now", "limited offer", "act now",
     "congratulations you won", "send me money", "investment opportunity",
+    "crypto giveaway", "double your money", "click the link",
     # Insults (French)
     "connard", "connasse", "putain", "merde", "salope", "encule",
-    "imbécile", "crétin", "débile", "espèce de",
+    "imbécile", "crétin", "débile", "espèce de", "salaud", "ordure",
 ]
 
-BANNED_EMOJIS = ["💦", "🍑", "🍆", "🍒", "🍌", "🫦", "🔞", "💩"]
+BANNED_EMOJIS = ["💦", "🍑", "🍆", "🍒", "🍌", "🫦", "🔞", "💩", "🔞"]
+
+# Sticker sets that are inappropriate (can expand)
+BANNED_STICKER_KEYWORDS = ["nsfw", "sex", "porn", "nude", "naked", "xxx"]
 
 # Non-coding keywords for GM (placeholder - can customize)
 GM_MESSAGES = [
@@ -90,6 +100,21 @@ def contains_banned_content(text):
     for emoji in BANNED_EMOJIS:
         if emoji in text:
             return True, f"banned emoji: {emoji}"
+
+    # Check for common obfuscations
+    # Replace common substitutions
+    normalized = lower.replace("0", "o").replace("1", "i").replace("3", "e")
+    normalized = normalized.replace("@", "a").replace("$", "s").replace("!", "i")
+
+    for word in BANNED_WORDS:
+        if word in normalized and word not in lower:
+            return True, f"banned word: {word}"
+
+    # Check for f-word variations
+    f_variants = ["fuck", "fuk", "fck", "phuck", "fvck"]
+    for fv in f_variants:
+        if fv in lower:
+            return True, f"banned word: {fv}"
 
     return False, None
 
@@ -231,6 +256,51 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"⚠️ Photo removed. Reason: {reason}. Warning {current_warnings}/3"
             )
+
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check stickers for inappropriate content."""
+    chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
+
+    if is_admin(user_id, chat_id, context):
+        return
+
+    sticker = update.message.sticker
+    if not sticker:
+        return
+
+    # Check sticker set name for banned keywords
+    set_name = (sticker.set_name or "").lower()
+    for keyword in BANNED_STICKER_KEYWORDS:
+        if keyword in set_name:
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+
+            data = get_group(chat_id)
+            current_warnings = data["warnings"].get(user_id, 0) + 1
+            data["warnings"][user_id] = current_warnings
+
+            if current_warnings >= 3:
+                try:
+                    await context.bot.ban_chat_member(chat_id, user_id)
+                    await update.message.reply_text(
+                        f"⛔ User banned (3 warnings). Reason: inappropriate sticker"
+                    )
+                except Exception:
+                    pass
+            else:
+                await update.message.reply_text(
+                    f"⚠️ Sticker removed. Warning {current_warnings}/3"
+                )
+            return
+
+    # Check if sticker is animated/video type (often NSFW)
+    if sticker.is_animated or sticker.is_video:
+        # These are often used for inappropriate content - flag but don't auto-delete
+        # You can change this to auto-delete if you want
+        pass
 
 # ==================== ADMIN COMMANDS ====================
 
@@ -517,6 +587,7 @@ def main():
     # Content moderation
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderate_content))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.STICKER, handle_sticker))
 
     threading.Thread(target=run_health_server, daemon=True).start()
 
