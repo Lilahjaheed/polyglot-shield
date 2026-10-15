@@ -308,16 +308,23 @@ async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     group_name = update.message.chat.title or "the group"
 
+    logger.info(f"MSG from {user_id} in {chat_id}: {text[:50]}")
+
     # Only work in registered groups
     if not is_registered(chat_id):
+        logger.info(f"Group {chat_id} NOT registered")
         return
+
+    logger.info(f"Group {chat_id} IS registered")
 
     # Skip admins
     if is_admin(user_id, chat_id, context):
+        logger.info(f"User {user_id} is admin, skipping")
         return
 
     # Check for banned content (including group rules)
     has_banned, reason = contains_banned_content(text, chat_id)
+    logger.info(f"Check result: banned={has_banned}, reason={reason}")
 
     if has_banned:
         # Get user info BEFORE deleting
