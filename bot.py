@@ -67,7 +67,11 @@ DISCUSSION_PROMPTS = [
 
 # ==================== STATE ====================
 
-# Per-group data: {chat_id: {"warnings": {user_id: count}, "new_members": [user_ids]}}
+import json
+
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
+
+# Per-group data: {chat_id: {"warnings": {user_id: count}, "new_members": [user_ids], "rules": str}}
 group_data = {}
 
 # Welcome batching: collect new members, send at end of day
@@ -76,6 +80,33 @@ pending_welcomes = {}  # {chat_id: [user_ids]}
 # Registered groups: only these groups can use the bot
 # Format: {chat_id: "group_name"}
 registered_groups = {}
+
+def load_data():
+    """Load data from file."""
+    global group_data, registered_groups
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r") as f:
+                data = json.load(f)
+                group_data = data.get("group_data", {})
+                registered_groups = data.get("registered_groups", {})
+            logger.info(f"Loaded data: {len(registered_groups)} groups, {len(group_data)} group records")
+    except Exception as e:
+        logger.error(f"Error loading data: {e}")
+
+def save_data():
+    """Save data to file."""
+    try:
+        with open(DATA_FILE, "w") as f:
+            json.dump({
+                "group_data": group_data,
+                "registered_groups": registered_groups
+            }, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving data: {e}")
+
+# Load data on startup
+load_data()
 
 # ==================== HELPERS ====================
 
@@ -334,6 +365,7 @@ async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_group(chat_id)
         current_warnings = data["warnings"].get(user_id, 0) + 1
         data["warnings"][user_id] = current_warnings
+        save_data()
 
         # Send DM notification to user
         await notify_user(context, user_id, current_warnings, reason, group_name)
@@ -395,6 +427,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_group(chat_id)
         current_warnings = data["warnings"].get(user_id, 0) + 1
         data["warnings"][user_id] = current_warnings
+        save_data()
         group_name = update.message.chat.title or "the group"
         username = update.message.from_user.first_name
 
@@ -451,6 +484,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data = get_group(chat_id)
             current_warnings = data["warnings"].get(user_id, 0) + 1
             data["warnings"][user_id] = current_warnings
+            save_data()
             group_name = update.message.chat.title or "the group"
             username = update.message.from_user.first_name
 
@@ -524,6 +558,7 @@ async def warn_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = get_group(chat_id)
     current_warnings = data["warnings"].get(user_id, 0) + 1
     data["warnings"][user_id] = current_warnings
+    save_data()
 
     await update.message.reply_text(
         f"⚠️ User warned. Warning {current_warnings}/3"
@@ -645,6 +680,7 @@ async def set_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rules = " ".join(context.args)
     data = get_group(chat_id)
     data["rules"] = rules
+    save_data()
 
     await update.message.reply_text(
         f"✅ Rules updated:\n\n{rules}",
@@ -683,6 +719,7 @@ async def register_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group_name = update.message.chat.title or "Unknown"
     registered_groups[chat_id] = group_name
+    save_data()
 
     await update.message.reply_text(
         f"✅ Group registered: {group_name}\n"
@@ -702,6 +739,7 @@ async def unregister_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     group_name = registered_groups.pop(chat_id)
+    save_data()
     await update.message.reply_text(f"✅ Group unregistered: {group_name}")
 
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
