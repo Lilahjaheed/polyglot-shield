@@ -98,13 +98,54 @@ def is_owner(user_id):
     """Check if user is the bot owner."""
     return user_id == OWNER_ID
 
-def contains_banned_content(text):
-    """Check if text contains banned words or emojis. Returns (True, reason) or (False, None)"""
+def extract_rule_keywords(rules_text):
+    """Extract banned topics/keywords from rules text."""
+    if not rules_text:
+        return []
+
+    lower = rules_text.lower()
+    keywords = []
+
+    # Common rule patterns - detect what's banned
+    rule_patterns = {
+        "politics": ["politics", "political", "election", "vote", "president", "government", "democrat", "republican", "trump", "biden"],
+        "religion": ["religion", "religious", "god", "allah", "jesus", "bible", "quran", "church", "mosque", "prayer"],
+        "dating": ["dating", "date", "relationship", "boyfriend", "girlfriend", "hookup", "romance"],
+        "gossip": ["gossip", "rumor", "rumour", "drama", "tea"],
+        "off-topic": ["off-topic", "off topic", "unrelated"],
+        "advertising": ["advertise", "advertisement", "promotion", "promote", "sell", "selling", "buy", "shopping"],
+        "profanity": ["profanity", "curse", "swear", "vulgar"],
+        "hate speech": ["hate speech", "racism", "racist", "discrimination", "homophobic", "sexist"],
+        "violence": ["violence", "violent", "fight", "weapon", "gun", "knife"],
+        "drugs": ["drugs", "drug", "marijuana", "weed", "cocaine", "alcohol", "drinking"],
+        "gambling": ["gambling", "gamble", "casino", "betting", "bet"],
+        "scams": ["scam", "fraud", "pyramid scheme", "get rich quick"],
+        "spam": ["spam", "flood", "multiple messages"],
+        "self-promotion": ["self-promotion", "self promotion", "promote yourself", "plug"],
+    }
+
+    for topic, words in rule_patterns.items():
+        if topic in lower or any(w in lower for w in words[:2]):
+            keywords.extend(words)
+
+    # Also extract quoted words or phrases
+    import re
+    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', rules_text)
+    for q in quoted:
+        word = q[0] or q[1]
+        if word:
+            keywords.append(word.lower())
+
+    return list(set(keywords))
+
+def contains_banned_content(text, chat_id=None):
+    """Check if text contains banned words, emojis, or violates group rules."""
     if not text:
         return False, None
 
     lower = text.lower()
 
+    # Check global banned words
     for word in BANNED_WORDS:
         if word in lower:
             return True, f"banned word: {word}"
@@ -127,6 +168,15 @@ def contains_banned_content(text):
     for fv in f_variants:
         if fv in lower:
             return True, f"banned word: {fv}"
+
+    # Check against group rules if chat_id provided
+    if chat_id and chat_id in group_data:
+        rules = group_data[chat_id].get("rules", "")
+        if rules:
+            rule_keywords = extract_rule_keywords(rules)
+            for keyword in rule_keywords:
+                if keyword and keyword in lower:
+                    return True, f"violates group rule: {keyword}"
 
     return False, None
 
@@ -214,8 +264,8 @@ async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(user_id, chat_id, context):
         return
 
-    # Check for banned content
-    has_banned, reason = contains_banned_content(text)
+    # Check for banned content (including group rules)
+    has_banned, reason = contains_banned_content(text, chat_id)
 
     if has_banned:
         # Get user info BEFORE deleting
@@ -280,7 +330,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     caption = update.message.caption or ""
-    has_banned, reason = contains_banned_content(caption)
+    has_banned, reason = contains_banned_content(caption, chat_id)
 
     if has_banned:
         data = get_group(chat_id)
