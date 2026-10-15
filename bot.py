@@ -72,6 +72,10 @@ group_data = {}
 # Welcome batching: collect new members, send at end of day
 pending_welcomes = {}  # {chat_id: [user_ids]}
 
+# Registered groups: only these groups can use the bot
+# Format: {chat_id: "group_name"}
+registered_groups = {}
+
 # ==================== HELPERS ====================
 
 def get_group(chat_id):
@@ -85,6 +89,14 @@ def is_admin(user_id, chat_id, context):
         return member.status in ("creator", "administrator")
     except Exception:
         return False
+
+def is_registered(chat_id):
+    """Check if a group is registered to use the bot."""
+    return chat_id in registered_groups
+
+def is_owner(user_id):
+    """Check if user is the bot owner."""
+    return user_id == OWNER_ID
 
 def contains_banned_content(text):
     """Check if text contains banned words or emojis. Returns (True, reason) or (False, None)"""
@@ -123,6 +135,10 @@ def contains_banned_content(text):
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome new members (batched at end of day)."""
     chat_id = update.message.chat.id
+
+    # Only work in registered groups
+    if not is_registered(chat_id):
+        return
 
     for member in update.message.new_chat_members:
         if member.is_bot:
@@ -190,6 +206,10 @@ async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     group_name = update.message.chat.title or "the group"
 
+    # Only work in registered groups
+    if not is_registered(chat_id):
+        return
+
     # Skip admins
     if is_admin(user_id, chat_id, context):
         return
@@ -252,6 +272,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     user_id = update.message.from_user.id
 
+    # Only work in registered groups
+    if not is_registered(chat_id):
+        return
+
     if is_admin(user_id, chat_id, context):
         return
 
@@ -299,6 +323,10 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check stickers for inappropriate content."""
     chat_id = update.message.chat.id
     user_id = update.message.from_user.id
+
+    # Only work in registered groups
+    if not is_registered(chat_id):
+        return
 
     if is_admin(user_id, chat_id, context):
         return
@@ -524,6 +552,64 @@ async def show_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# ==================== OWNER COMMANDS ====================
+
+async def register_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: Register a group to use the bot. Add bot to group first, then use /register."""
+    if not is_owner(update.message.from_user.id):
+        return
+
+    chat_id = update.message.chat.id
+
+    if update.message.chat.type == "private":
+        await update.message.reply_text(
+            "Add me to the group first, then send /register in that group."
+        )
+        return
+
+    if chat_id in registered_groups:
+        await update.message.reply_text("This group is already registered.")
+        return
+
+    group_name = update.message.chat.title or "Unknown"
+    registered_groups[chat_id] = group_name
+
+    await update.message.reply_text(
+        f"✅ Group registered: {group_name}\n"
+        f"Chat ID: {chat_id}\n\n"
+        f"Bot is now active in this group."
+    )
+
+async def unregister_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: Unregister a group."""
+    if not is_owner(update.message.from_user.id):
+        return
+
+    chat_id = update.message.chat.id
+
+    if chat_id not in registered_groups:
+        await update.message.reply_text("This group is not registered.")
+        return
+
+    group_name = registered_groups.pop(chat_id)
+    await update.message.reply_text(f"✅ Group unregistered: {group_name}")
+
+async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: List all registered groups."""
+    if not is_owner(update.message.from_user.id):
+        return
+
+    if not registered_groups:
+        await update.message.reply_text("No groups registered yet.")
+        return
+
+    msg = "📋 *Registered Groups*\n\n"
+    for chat_id, name in registered_groups.items():
+        msg += f"• {name} ({chat_id})\n"
+
+    msg += f"\nTotal: {len(registered_groups)} groups"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View moderation stats."""
     chat_id = update.message.chat.id
@@ -580,8 +666,10 @@ async def send_discussion(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app):
     """Set bot commands."""
+    from telegram import BotCommandScopeChat
+
+    # Default commands for group admins
     await app.bot.set_my_commands([
-        BotCommand("start", "Start the bot"),
         BotCommand("warn", "Warn a user"),
         BotCommand("unwarn", "Remove a warning"),
         BotCommand("warnings", "View warnings"),
@@ -591,6 +679,22 @@ async def post_init(app):
         BotCommand("setrules", "Set rules"),
         BotCommand("stats", "View stats"),
     ])
+
+    # Owner commands only visible to owner
+    if OWNER_ID:
+        await app.bot.set_my_commands([
+            BotCommand("register", "Register this group"),
+            BotCommand("unregister", "Unregister this group"),
+            BotCommand("groups", "List registered groups"),
+            BotCommand("warn", "Warn a user"),
+            BotCommand("unwarn", "Remove a warning"),
+            BotCommand("warnings", "View warnings"),
+            BotCommand("ban", "Ban a user"),
+            BotCommand("unban", "Unban a user"),
+            BotCommand("rules", "Show rules"),
+            BotCommand("setrules", "Set rules"),
+            BotCommand("stats", "View stats"),
+        ], scope=BotCommandScopeChat(chat_id=OWNER_ID))
 
     # Schedule GM at 8:00 AM daily
     app.job_queue.run_daily(send_gm, time=time(8, 0))
@@ -636,6 +740,11 @@ def main():
     app.add_handler(CommandHandler("rules", show_rules))
     app.add_handler(CommandHandler("setrules", set_rules))
     app.add_handler(CommandHandler("stats", stats))
+
+    # Owner commands
+    app.add_handler(CommandHandler("register", register_group))
+    app.add_handler(CommandHandler("unregister", unregister_group))
+    app.add_handler(CommandHandler("groups", list_groups))
 
     # Welcome new members
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
