@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import threading
 from datetime import datetime, time, timedelta
@@ -106,30 +107,76 @@ def extract_rule_keywords(rules_text):
     lower = rules_text.lower()
     keywords = []
 
-    # Common rule patterns - detect what's banned
-    rule_patterns = {
-        "politics": ["politics", "political", "election", "vote", "president", "government", "democrat", "republican", "trump", "biden"],
-        "religion": ["religion", "religious", "god", "allah", "jesus", "bible", "quran", "church", "mosque", "prayer"],
-        "dating": ["dating", "date", "relationship", "boyfriend", "girlfriend", "hookup", "romance"],
-        "gossip": ["gossip", "rumor", "rumour", "drama", "tea"],
-        "off-topic": ["off-topic", "off topic", "unrelated"],
-        "advertising": ["advertise", "advertisement", "promotion", "promote", "sell", "selling", "buy", "shopping"],
-        "profanity": ["profanity", "curse", "swear", "vulgar"],
-        "hate speech": ["hate speech", "racism", "racist", "discrimination", "homophobic", "sexist"],
-        "violence": ["violence", "violent", "fight", "weapon", "gun", "knife"],
-        "drugs": ["drugs", "drug", "marijuana", "weed", "cocaine", "alcohol", "drinking"],
-        "gambling": ["gambling", "gamble", "casino", "betting", "bet"],
-        "scams": ["scam", "fraud", "pyramid scheme", "get rich quick"],
-        "spam": ["spam", "flood", "multiple messages"],
-        "self-promotion": ["self-promotion", "self promotion", "promote yourself", "plug"],
+    # Detect action words that indicate what's banned
+    ban_indicators = [
+        "no ", "not ", "don't", "do not", "cannot", "can't", "never",
+        "ban", "block", "delete", "remove", "forbidden", "prohibited",
+        "not allowed", "is not allowed", "are not allowed",
+    ]
+
+    # Check if rule says "delete all messages" or "no messages"
+    delete_all_patterns = [
+        "delete all", "no messages", "cannot message", "can't message",
+        "no talking", "no speaking", "mute everyone", "members cannot",
+        "members can't", "no member", "silent", "read only", "readonly",
+    ]
+
+    for pattern in delete_all_patterns:
+        if pattern in lower:
+            keywords.extend(["__DELETE_ALL__"])
+            break
+
+    # Split rules into individual rules
+    rule_lines = re.split(r'[.\n;]|\d+\.', rules_text)
+
+    for line in rule_lines:
+        line = line.strip().lower()
+        if not line:
+            continue
+
+        # Find what's being banned in each rule
+        # Look for words after "no", "not", "don't", etc.
+        for indicator in ban_indicators:
+            if indicator in line:
+                # Get the text after the indicator
+                idx = line.find(indicator) + len(indicator)
+                banned_text = line[idx:].strip()
+
+                # Clean up the banned text
+                banned_text = re.sub(r'\b(allowed|permitted|tolerated)\b', '', banned_text).strip()
+                banned_text = re.sub(r'\bthe\b|\ba\b|\ban\b', '', banned_text).strip()
+
+                if banned_text and len(banned_text) > 1:
+                    # Split multi-word phrases into individual keywords
+                    words = banned_text.split()
+                    for w in words:
+                        w = w.strip(".,!?;:'\"")
+                        if len(w) > 2 and w not in ['and', 'or', 'the', 'are', 'is', 'not', 'any', 'all', 'use', 'like']:
+                            keywords.append(w)
+
+                    # Also add the full phrase
+                    keywords.append(banned_text)
+
+    # Common rule keywords mapping
+    rule_keyword_map = {
+        "spam": ["spam", "flooding", "flood", "repeated", "multiple messages"],
+        "explicit": ["explicit", "nsfw", "18+", "adult", "sexual", "porn", "nude", "naked"],
+        "insult": ["insult", "insulting", "offensive", "rude", "disrespectful", "toxic"],
+        "stupid": ["stupid", "idiot", "dumb", "moron"],
+        "fuck": ["fuck", "fucking", "fucked", "fck", "fuk"],
+        "ad": ["ad", "ads", "advertisement", "advertising", "promotion", "promote"],
+        "politics": ["politics", "political", "election", "vote", "government"],
+        "religion": ["religion", "religious", "god", "church", "mosque"],
+        "dating": ["dating", "date", "relationship", "romance"],
+        "message": ["message", "messages", "talk", "speak", "chat", "send"],
     }
 
-    for topic, words in rule_patterns.items():
-        if topic in lower or any(w in lower for w in words[:2]):
-            keywords.extend(words)
+    # Check if any rule keywords appear in the rules text
+    for rule_word, related_keywords in rule_keyword_map.items():
+        if rule_word in lower:
+            keywords.extend(related_keywords)
 
-    # Also extract quoted words or phrases
-    import re
+    # Extract quoted words
     quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', rules_text)
     for q in quoted:
         word = q[0] or q[1]
@@ -174,8 +221,13 @@ def contains_banned_content(text, chat_id=None):
         rules = group_data[chat_id].get("rules", "")
         if rules:
             rule_keywords = extract_rule_keywords(rules)
+
+            # Check for delete-all rule
+            if "__DELETE_ALL__" in rule_keywords:
+                return True, "group rule: members cannot message"
+
             for keyword in rule_keywords:
-                if keyword and keyword in lower:
+                if keyword and keyword in lower and keyword != "__DELETE_ALL__":
                     return True, f"violates group rule: {keyword}"
 
     return False, None
