@@ -120,29 +120,6 @@ def contains_banned_content(text):
 
 # ==================== HANDLERS ====================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message."""
-    if update.message.chat.type == "private":
-        await update.message.reply_text(
-            "🛡️ *Polyglot Shield Bot*\n\n"
-            "I protect Telegram groups from:\n"
-            "• Porn & sexual content\n"
-            "• Insults & offensive language\n"
-            "• Spam & scams\n"
-            "• Misused emojis\n\n"
-            "Add me to your group and make me admin to start protecting your community!\n\n"
-            "Commands:\n"
-            "/warn - Warn a user\n"
-            "/unwarn - Remove a warning\n"
-            "/warnings - View user warnings\n"
-            "/ban - Ban a user\n"
-            "/unban - Unban a user\n"
-            "/rules - Show group rules\n"
-            "/setrules - Set group rules\n"
-            "/stats - View moderation stats",
-            parse_mode="Markdown"
-        )
-
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome new members (batched at end of day)."""
     chat_id = update.message.chat.id
@@ -651,7 +628,6 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Commands
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("warn", warn_user))
     app.add_handler(CommandHandler("unwarn", unwarn_user))
     app.add_handler(CommandHandler("warnings", view_warnings))
