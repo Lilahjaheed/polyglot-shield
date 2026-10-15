@@ -111,9 +111,10 @@ load_data()
 # ==================== HELPERS ====================
 
 def get_group(chat_id):
-    if chat_id not in group_data:
-        group_data[chat_id] = {"warnings": {}, "new_members": []}
-    return group_data[chat_id]
+    key = str(chat_id)
+    if key not in group_data:
+        group_data[key] = {"warnings": {}, "new_members": []}
+    return group_data[key]
 
 def is_admin(user_id, chat_id, context):
     try:
@@ -124,7 +125,7 @@ def is_admin(user_id, chat_id, context):
 
 def is_registered(chat_id):
     """Check if a group is registered to use the bot."""
-    return chat_id in registered_groups
+    return str(chat_id) in registered_groups or chat_id in registered_groups
 
 def is_owner(user_id):
     """Check if user is the bot owner."""
@@ -248,18 +249,21 @@ def contains_banned_content(text, chat_id=None):
             return True, f"banned word: {fv}"
 
     # Check against group rules if chat_id provided
-    if chat_id and chat_id in group_data:
-        rules = group_data[chat_id].get("rules", "")
-        if rules:
-            rule_keywords = extract_rule_keywords(rules)
+    if chat_id is not None:
+        # JSON stores keys as strings, so check both int and str
+        group = group_data.get(str(chat_id)) or group_data.get(chat_id)
+        if group:
+            rules = group.get("rules", "")
+            if rules:
+                rule_keywords = extract_rule_keywords(rules)
 
-            # Check for delete-all rule
-            if "__DELETE_ALL__" in rule_keywords:
-                return True, "group rule: members cannot message"
+                # Check for delete-all rule
+                if "__DELETE_ALL__" in rule_keywords:
+                    return True, "group rule: members cannot message"
 
-            for keyword in rule_keywords:
-                if keyword and keyword in lower and keyword != "__DELETE_ALL__":
-                    return True, f"violates group rule: {keyword}"
+                for keyword in rule_keywords:
+                    if keyword and keyword in lower and keyword != "__DELETE_ALL__":
+                        return True, f"violates group rule: {keyword}"
 
     return False, None
 
