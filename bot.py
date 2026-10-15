@@ -387,9 +387,9 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def warn_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Warn a user: /warn @username or /warn user_id"""
     chat_id = update.message.chat.id
-    admin_id = update.message.from_user.id
+    user_id = update.message.from_user.id
 
-    if not is_admin(admin_id, chat_id, context):
+    if not is_owner(user_id) and not is_admin(user_id, chat_id, context):
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -423,9 +423,9 @@ async def warn_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unwarn_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove a warning: /unwarn user_id"""
     chat_id = update.message.chat.id
-    admin_id = update.message.from_user.id
+    user_id = update.message.from_user.id
 
-    if not is_admin(admin_id, chat_id, context):
+    if not is_owner(user_id) and not is_admin(user_id, chat_id, context):
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -469,9 +469,9 @@ async def view_warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ban a user: /ban user_id"""
     chat_id = update.message.chat.id
-    admin_id = update.message.from_user.id
+    user_id = update.message.from_user.id
 
-    if not is_admin(admin_id, chat_id, context):
+    if not is_owner(user_id) and not is_admin(user_id, chat_id, context):
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -494,9 +494,9 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Unban a user: /unban user_id"""
     chat_id = update.message.chat.id
-    admin_id = update.message.from_user.id
+    user_id = update.message.from_user.id
 
-    if not is_admin(admin_id, chat_id, context):
+    if not is_owner(user_id) and not is_admin(user_id, chat_id, context):
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -519,9 +519,10 @@ async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set group rules: /setrules <rules text>"""
     chat_id = update.message.chat.id
-    admin_id = update.message.from_user.id
+    user_id = update.message.from_user.id
 
-    if not is_admin(admin_id, chat_id, context):
+    # Allow owner OR group admin
+    if not is_owner(user_id) and not is_admin(user_id, chat_id, context):
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -613,8 +614,9 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View moderation stats."""
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
 
-    if not is_admin(update.message.from_user.id, chat_id, context):
+    if not is_owner(user_id) and not is_admin(user_id, chat_id, context):
         await update.message.reply_text("⛔ Admin only.")
         return
 
