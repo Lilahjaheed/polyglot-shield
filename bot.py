@@ -1,7 +1,9 @@
 import os
 import re
+import json
 import logging
 import threading
+import requests
 from datetime import datetime, time, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
@@ -11,6 +13,7 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "6416848944"))
 
 logging.basicConfig(level=logging.INFO)
@@ -267,6 +270,48 @@ def contains_banned_content(text, chat_id=None):
 
     return False, None
 
+def check_with_gemini(text, rules):
+    """Use Gemini AI to check if message violates rules."""
+    if not GEMINI_API_KEY or not text or not rules:
+        return False, None
+
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GEMINI_API_KEY}"
+
+        prompt = f"""You are a group moderator. Check if this message violates the group rules.
+
+GROUP RULES:
+{rules}
+
+MESSAGE TO CHECK:
+"{text}"
+
+Reply with ONLY "YES" or "NO".
+If YES, also add a short reason after a dash like: YES - reason here"""
+
+        response = requests.post(url, json={
+            "contents": [{"parts": [{"text": prompt}]}]
+        }, timeout=5)
+
+        if response.status_code == 200:
+            result = response.json()
+            answer = result["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
+
+            if answer.startswith("YES"):
+                # Extract reason if provided
+                if "-" in answer:
+                    reason = answer.split("-", 1)[1].strip()
+                    return True, reason
+                return True, "violates group rules"
+            return False, None
+        else:
+            logger.error(f"Gemini API error: {response.status_code}")
+            return False, None
+
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        return False, None
+
 # ==================== HANDLERS ====================
 
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -359,7 +404,15 @@ async def moderate_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check for banned content (including group rules)
     has_banned, reason = contains_banned_content(text, chat_id)
-    logger.info(f"Check result: banned={has_banned}, reason={reason}")
+    logger.info(f"Keyword check: banned={has_banned}, reason={reason}")
+
+    # If not caught by keywords, check with Gemini AI
+    if not has_banned:
+        group = group_data.get(str(chat_id)) or group_data.get(chat_id)
+        rules = group.get("rules", "") if group else ""
+        if rules:
+            has_banned, reason = check_with_gemini(text, rules)
+            logger.info(f"Gemini check: banned={has_banned}, reason={reason}")
 
     if has_banned:
         # Get user info BEFORE deleting
