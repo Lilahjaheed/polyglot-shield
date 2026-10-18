@@ -1,4 +1,4 @@
-BOT_VERSION = "3.4"
+BOT_VERSION = "4.0"
 
 import os
 import json
@@ -9,10 +9,10 @@ import subprocess
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from playwright.async_api import async_playwright
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
+    CallbackQueryHandler, ContextTypes, filters
 )
 
 # Load config
@@ -70,27 +70,36 @@ def generate_phone():
     number = random.randint(10000000, 99999999)
     return f"{prefix}{number}"
 
-def generate_email():
+def generate_matching_name():
+    """Generate matching username and email (no dots or underscores)."""
     first_names = [
         "muhammad", "john", "david", "sarah", "ahmed", "mary",
         "ali", "grace", "daniel", "esther", "michael", "rachel",
         "ibrahim", "fatima", "chinedu", "amara", "yusuf", "zainab",
         "emeka", "ngozi", "tunde", "kemi", "musa", "ada",
-        "sadiq", "benita", "glory", "blessing", "victor", "hauwa"
+        "sadiq", "benita", "glory", "blessing", "victor", "hauwa",
+        "peter", "ruth", "samuel", "hannah", "isaac", "deborah",
+        "joseph", "ruth", "david", "grace", "solomon", "esther"
     ]
     last_names = [
         "muhammad", "smith", "johnson", "williams", "brown", "jones",
         "garcia", "miller", "davis", "wilson", "anderson", "taylor",
         "thomas", "moore", "martin", "jackson", "white", "harris",
         "clark", "lewis", "okonkwo", "adeyemi", "obinna", "nwosu",
-        "ibrahim", "ali", "hassan", "osei", "mensah", "kamara"
+        "ibrahim", "ali", "hassan", "osei", "mensah", "kamara",
+        "obi", "eze", "okafor", "bello", "usman", "yusuf"
     ]
     domains = ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com"]
+    
     first = random.choice(first_names)
     last = random.choice(last_names)
     domain = random.choice(domains)
-    separator = random.choice(["", ".", "_", str(random.randint(1, 99))])
-    return f"{first}{separator}{last}@{domain}"
+    
+    # No dots or underscores - just concatenate
+    name = f"{first}{last}"
+    email = f"{name}@{domain}"
+    
+    return name, email
 
 def generate_password():
     chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%"
@@ -149,17 +158,119 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Access denied.")
         return
     
+    keyboard = [
+        [
+            InlineKeyboardButton("1 Account", callback_data="create_1"),
+            InlineKeyboardButton("5 Accounts", callback_data="create_5"),
+        ],
+        [
+            InlineKeyboardButton("10 Accounts", callback_data="create_10"),
+            InlineKeyboardButton("20 Accounts", callback_data="create_20"),
+        ],
+        [
+            InlineKeyboardButton("50 Accounts", callback_data="create_50"),
+            InlineKeyboardButton("100 Accounts", callback_data="create_100"),
+        ],
+        [
+            InlineKeyboardButton("📋 View Accounts", callback_data="view_accounts"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="show_settings"),
+        ],
+    ]
+    
     await update.message.reply_text(
         f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
-        "Create accounts automatically on your website.\n\n"
-        "Commands:\n"
-        "/newuser - Auto create new account\n"
-        "/list - View all created accounts\n"
-        "/test - Test connection to website\n"
-        "/seturl <url> - Change website URL\n"
-        "/config - View current settings",
+        f"Website: readersbuck.com\n"
+        f"Accounts created: {len(users)}\n\n"
+        f"Select how many accounts to create:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button presses."""
+    query = update.callback_query
+    
+    if query.from_user.id != OWNER_ID:
+        await query.answer("⛔ Access denied.")
+        return
+    
+    await query.answer()
+    
+    data = query.data
+    
+    if data.startswith("create_"):
+        count = int(data.split("_")[1])
+        await query.edit_message_text(f"🔄 Creating {count} account(s)... Please wait...")
+        
+        created = []
+        failed = 0
+        
+        for i in range(count):
+            full_name = generate_full_name()
+            phone = generate_phone()
+            username, email = generate_matching_name()
+            password = generate_password()
+            
+            success, message = await signup_on_website(full_name, phone, email, password)
+            
+            if success:
+                users[email] = {
+                    "full_name": full_name,
+                    "phone": phone,
+                    "password": password,
+                    "status": "active"
+                }
+                created.append(email)
+                save_users(users)
+            else:
+                failed += 1
+        
+        result = f"✅ *Done! (v{BOT_VERSION})*\n\n"
+        result += f"Created: {len(created)}\n"
+        if failed > 0:
+            result += f"Failed: {failed}\n"
+        result += f"Total accounts: {len(users)}\n\n"
+        
+        if created:
+            result += "*Accounts:*\n"
+            for email in created[:10]:  # Show first 10
+                result += f"• `{email}`\n"
+            if len(created) > 10:
+                result += f"... and {len(created) - 10} more"
+        
+        await query.edit_message_text(result, parse_mode="Markdown")
+    
+    elif data == "view_accounts":
+        if not users:
+            await query.edit_message_text("No accounts yet.")
+            return
+        
+        msg = f"📋 *Accounts (v{BOT_VERSION})*\n\n"
+        count = 0
+        for email, user_data in users.items():
+            if count >= 20:
+                msg += f"... and {len(users) - 20} more\n"
+                break
+            msg += f"• {user_data.get('full_name', 'Unknown')}\n"
+            msg += f"  📧 `{email}`\n"
+            msg += f"  📱 {user_data.get('phone', 'N/A')}\n\n"
+            count += 1
+        
+        msg += f"Total: {len(users)} accounts"
+        await query.edit_message_text(msg, parse_mode="Markdown")
+    
+    elif data == "show_settings":
+        await query.edit_message_text(
+            f"⚙️ *Settings (v{BOT_VERSION})*\n\n"
+            f"Website: {WEBSITE_URL}\n"
+            f"Referral: {REFERRAL_CODE}\n"
+            f"Name pool: {len(NAME_POOL)} names\n"
+            f"Accounts created: {len(users)}\n\n"
+            f"Commands:\n"
+            f"/seturl <url> - Change URL\n"
+            f"/test - Test connection",
+            parse_mode="Markdown"
+        )
 
 async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
@@ -169,7 +280,7 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     full_name = generate_full_name()
     phone = generate_phone()
-    email = generate_email()
+    username, email = generate_matching_name()
     password = generate_password()
     
     success, message = await signup_on_website(full_name, phone, email, password)
@@ -177,6 +288,7 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if success:
         users[email] = {
             "full_name": full_name,
+            "username": username,
             "phone": phone,
             "password": password,
             "status": "active"
@@ -303,6 +415,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(CommandHandler("newuser", new_user))
     app.add_handler(CommandHandler("list", list_users))
     app.add_handler(CommandHandler("test", test_connection))
