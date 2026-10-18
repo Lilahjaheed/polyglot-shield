@@ -100,26 +100,39 @@ async def signup_on_website(full_name, phone, email, password):
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
             )
-            page = await browser.new_page()
-            await page.goto(WEBSITE_URL, timeout=30000)
-            await page.wait_for_timeout(2000)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
             
-            # Fill using exact selectors from readersbuck.com
+            await page.goto(WEBSITE_URL, timeout=60000, wait_until="networkidle")
+            await page.wait_for_timeout(3000)
+            
+            # Wait for form to load
+            await page.wait_for_selector("#name", timeout=30000)
+            
+            # Fill using exact selectors
             await page.fill("#name", full_name)
             await page.fill("#phone", phone)
             await page.fill("#email", email)
             await page.fill("#password", password)
             
-            # Referral is readonly, already pre-filled with 0fc8fbfb
+            await page.wait_for_timeout(1000)
+            
             # Click Create account button
             await page.click("#submitBtn")
             await page.wait_for_timeout(5000)
             
-            # Check if account was created
+            # Check result
             page_content = await page.content()
+            current_url = page.url
             await browser.close()
+            
+            # If redirected away from register page, it worked
+            if "register" not in current_url.lower():
+                return True, f"Account created! (redirected to {current_url})"
             
             if "invalid" in page_content.lower() or "error" in page_content.lower():
                 return False, "Website rejected the signup"
