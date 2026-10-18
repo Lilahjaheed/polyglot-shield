@@ -395,18 +395,54 @@ def run_health_server():
     server.serve_forever()
 
 async def post_init(app):
-    """Set bot commands menu."""
-    # Delete old commands first
-    await app.bot.delete_my_commands()
-    # Set new commands
-    await app.bot.set_my_commands([
+    """Set bot commands menu - clear ALL old scopes from moderation bot."""
+    from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeAllChatAdministrators
+    
+    new_commands = [
         BotCommand("start", "Show bot info"),
         BotCommand("newuser", "Auto create new account"),
         BotCommand("list", "View all created accounts"),
         BotCommand("test", "Test connection to website"),
         BotCommand("seturl", "Change website URL"),
         BotCommand("config", "View current settings"),
-    ])
+    ]
+    
+    try:
+        # Delete default scope
+        await app.bot.delete_my_commands()
+        # Delete old scoped commands (from moderation bot)
+        await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
+        await app.bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
+        await app.bot.delete_my_commands(scope=BotCommandScopeAllChatAdministrators())
+        # Set new commands
+        await app.bot.set_my_commands(new_commands)
+        
+        # Also clear/set owner private chat (old bot used per-chat scopes)
+        from telegram import BotCommandScopeChat
+        try:
+            await app.bot.delete_my_commands(scope=BotCommandScopeChat(OWNER_ID))
+        except Exception:
+            pass
+        await app.bot.set_my_commands(new_commands, scope=BotCommandScopeChat(OWNER_ID))
+        
+        # Clear/set any registered groups from old moderation bot
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json"), "r") as f:
+                old_data = json.load(f)
+            group_ids = old_data.get("registered_groups", old_data.get("groups", []))
+            if isinstance(group_ids, dict):
+                group_ids = list(group_ids.keys())
+            for gid in group_ids:
+                try:
+                    await app.bot.delete_my_commands(scope=BotCommandScopeChat(int(gid)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
+        print("✅ Command menu updated")
+    except Exception as e:
+        print(f"⚠️ Menu update error: {e}")
 
 def main():
     # Ensure Chromium is installed before starting
