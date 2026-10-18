@@ -3,10 +3,12 @@ services:
     name: polyglot-shield
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: OWNER_ID
         value: 6416848944
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/.cache/ms-playwright
