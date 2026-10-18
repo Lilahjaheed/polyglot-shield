@@ -1,6 +1,7 @@
-BOT_VERSION = "4.2"
+BOT_VERSION = "4.3"
 
 import os
+import re
 import json
 import random
 import logging
@@ -109,52 +110,62 @@ def generate_password():
     length = random.randint(10, 14)
     return "".join(random.choice(chars) for _ in range(length))
 
-async def signup_on_website(full_name, phone, email, password):
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
-            
-            await page.goto(WEBSITE_URL, timeout=60000, wait_until="networkidle")
-            await page.wait_for_timeout(3000)
-            
-            # Wait for form to load
-            await page.wait_for_selector("#name", timeout=30000)
-            
-            # Fill using exact selectors
-            await page.fill("#name", full_name)
-            await page.fill("#phone", phone)
-            await page.fill("#email", email)
-            await page.fill("#password", password)
-            
-            await page.wait_for_timeout(1000)
-            
-            # Click Create account button
-            await page.click("#submitBtn")
-            await page.wait_for_timeout(5000)
-            
-            # Check result
-            page_content = await page.content()
-            current_url = page.url
-            await browser.close()
-            
-            # If redirected away from register page, it worked
-            if "register" not in current_url.lower():
-                return True, f"Account created! (redirected to {current_url})"
-            
-            if "invalid" in page_content.lower() or "error" in page_content.lower():
-                return False, "Website rejected the signup"
-            
-            return True, "Account created!"
-            
-    except Exception as e:
-        return False, f"Error: {str(e)}"
+async def signup_on_website(full_name, phone, email, password, max_attempts=3):
+    last_error = "Unknown error"
+    for attempt in range(max_attempts):
+        # Fresh data each attempt
+        if attempt > 0:
+            phone = generate_phone()
+            _, email = generate_matching_name()
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                )
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
+                
+                await page.goto(WEBSITE_URL, timeout=60000, wait_until="networkidle")
+                await page.wait_for_timeout(2000)
+                
+                await page.wait_for_selector("#name", timeout=30000)
+                
+                await page.fill("#name", full_name)
+                await page.fill("#phone", phone)
+                await page.fill("#email", email)
+                await page.fill("#password", password)
+                
+                await page.wait_for_timeout(500)
+                
+                await page.click("#submitBtn")
+                await page.wait_for_timeout(5000)
+                
+                page_content = await page.content()
+                current_url = page.url
+                await browser.close()
+                
+                # Success: redirected away from register page
+                if "register" not in current_url.lower():
+                    return True, "Account created!", email, phone
+                
+                # Extract actual error message from the error box
+                err_match = re.search(r'class="error"[^>]*>(.*?)</div>', page_content, re.S)
+                if err_match:
+                    err_text = re.sub(r'<[^>]+>', '', err_match.group(1)).strip()
+                    last_error = err_text
+                    # Duplicate data - retry with fresh email/phone
+                    if "already" in err_text.lower():
+                        continue
+                    return False, err_text, email, phone
+                
+                last_error = "No redirect, no error box (page may have changed)"
+        except Exception as e:
+            last_error = f"Error: {str(e)}"
+    
+    return False, last_error, email, phone
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
@@ -212,7 +223,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         JOB["event"] = asyncio.Event()
         
         stop_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", callback_data="stop_job")]])
-        status = {"done": 0, "created": [], "failed": 0, "total": count}
         progress_lock = asyncio.Lock()
         
         def progress_text():
@@ -221,9 +231,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt += f"✅ Created: {len(status['created'])}   ❌ Failed: {status['failed']}\n"
             if status["created"]:
                 txt += "\n*Latest:*\n"
-                for e in status["created"][-5:]:
-                    txt += f"  • `{e}`\n"
+                for e in status["created"][-3:]:
+                    txt += f"  ✅ `{e}`\n"
+            if status.get("errors"):
+                txt += "\n*Errors:*\n"
+                for e in status["errors"][-3:]:
+                    txt += f"  ❌ {e}\n"
             return txt
+        
+        status = {"done": 0, "created": [], "failed": 0, "total": count, "errors": []}
         
         await query.edit_message_text(progress_text(), reply_markup=stop_btn, parse_mode="Markdown")
         
@@ -251,20 +267,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username, email = generate_matching_name()
                 password = generate_password()
                 
-                success, message = await signup_on_website(full_name, phone, email, password)
+                success, message, final_email, final_phone = await signup_on_website(full_name, phone, email, password)
                 
                 if success and not JOB["event"].is_set():
-                    users[email] = {
+                    users[final_email] = {
                         "full_name": full_name,
                         "username": username,
-                        "phone": phone,
+                        "phone": final_phone,
                         "password": password,
                         "status": "active"
                     }
-                    status["created"].append(email)
+                    status["created"].append(final_email)
                     save_users(users)
                 else:
                     status["failed"] += 1
+                    status["errors"].append(f"{final_email}: {message}")
                 status["done"] += 1
                 await live_update()
         
@@ -288,6 +305,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result += f"  • `{e}`\n"
             if len(status["created"]) > 15:
                 result += f"  ... and {len(status['created']) - 15} more"
+        
+        if status.get("errors"):
+            result += "\n\n*Failure reasons:*\n"
+            for e in status["errors"][:10]:
+                result += f"  ❌ {e}\n"
         
         await query.edit_message_text(result, parse_mode="Markdown")
     
@@ -346,13 +368,13 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username, email = generate_matching_name()
     password = generate_password()
     
-    success, message = await signup_on_website(full_name, phone, email, password)
+    success, message, final_email, final_phone = await signup_on_website(full_name, phone, email, password)
     
     if success:
-        users[email] = {
+        users[final_email] = {
             "full_name": full_name,
             "username": username,
-            "phone": phone,
+            "phone": final_phone,
             "password": password,
             "status": "active"
         }
@@ -360,14 +382,14 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *Account Created! (v{BOT_VERSION})*\n\n"
             f"Name: {full_name}\n"
-            f"Phone: {phone}\n"
-            f"Email: `{email}`\n"
+            f"Phone: {final_phone}\n"
+            f"Email: `{final_email}`\n"
             f"Password: `{password}`\n"
             f"Referral: `{REFERRAL_CODE}`",
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text(f"❌ {message}")
+        await update.message.reply_text(f"❌ *Failed (v{BOT_VERSION})*\n\nReason: {message}", parse_mode="Markdown")
 
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
