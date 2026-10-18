@@ -1,4 +1,4 @@
-BOT_VERSION = "3.3"
+BOT_VERSION = "3.4"
 
 import os
 import json
@@ -63,10 +63,12 @@ def generate_full_name():
     return random.choice(NAME_POOL)
 
 def generate_phone():
-    prefixes = ["0803", "0806", "0813", "0816", "0903", "0906", "0703", "0706"]
+    """Generate 11-digit Nigerian phone number starting with 09, 07, or 08."""
+    prefixes = ["090", "091", "080", "081", "070", "071"]
     prefix = random.choice(prefixes)
+    # 11 digits total: 3 prefix + 8 random digits
     number = random.randint(10000000, 99999999)
-    return f"{prefix} {number}"
+    return f"{prefix}{number}"
 
 def generate_email():
     first_names = [
