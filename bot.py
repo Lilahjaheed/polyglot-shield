@@ -1,4 +1,4 @@
-BOT_VERSION = "4.4"
+BOT_VERSION = "4.5"
 
 import os
 import re
@@ -356,19 +356,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("No accounts yet.")
             return
         
-        msg = f"📋 *Accounts (v{BOT_VERSION})*\n\n"
-        count = 0
+        entries = []
         for email, user_data in users.items():
-            if count >= 20:
-                msg += f"... and {len(users) - 20} more\n"
-                break
-            msg += f"• {user_data.get('full_name', 'Unknown')}\n"
-            msg += f"  📧 `{email}`\n"
-            msg += f"  📱 {user_data.get('phone', 'N/A')}\n\n"
-            count += 1
+            entries.append(
+                f"• {user_data.get('full_name', 'Unknown')}\n"
+                f"  📧 {email}\n"
+                f"  📱 {user_data.get('phone', 'N/A')}\n"
+                f"  🔑 {user_data.get('password', 'N/A')}\n"
+            )
         
-        msg += f"Total: {len(users)} accounts"
-        await query.edit_message_text(msg, parse_mode="Markdown")
+        # Send as multiple messages if too long for one Telegram message (4096 limit)
+        chunks = []
+        current = f"📋 *Accounts (v{BOT_VERSION})*\n\n"
+        for e in entries:
+            if len(current) + len(e) > 3900:
+                chunks.append(current)
+                current = ""
+            current += e
+        current += f"\nTotal: {len(users)} accounts"
+        chunks.append(current)
+        
+        await query.edit_message_text(chunks[0], parse_mode="Markdown")
+        for chunk in chunks[1:]:
+            await query.message.reply_text(chunk, parse_mode="Markdown")
     
     elif data == "show_settings":
         await query.edit_message_text(
@@ -425,14 +435,27 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No accounts yet.")
         return
     
-    msg = f"📋 *Accounts (v{BOT_VERSION})*\n\n"
+    entries = []
     for email, data in users.items():
-        msg += f"• {data.get('full_name', 'Unknown')}\n"
-        msg += f"  📧 {email}\n"
-        msg += f"  📱 {data.get('phone', 'N/A')}\n\n"
+        entries.append(
+            f"• {data.get('full_name', 'Unknown')}\n"
+            f"  📧 {email}\n"
+            f"  📱 {data.get('phone', 'N/A')}\n"
+            f"  🔑 {data.get('password', 'N/A')}\n"
+        )
     
-    msg += f"Total: {len(users)} accounts"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    chunks = []
+    current = f"📋 *Accounts (v{BOT_VERSION})*\n\n"
+    for e in entries:
+        if len(current) + len(e) > 3900:
+            chunks.append(current)
+            current = ""
+        current += e
+    current += f"\nTotal: {len(users)} accounts"
+    chunks.append(current)
+    
+    for chunk in chunks:
+        await update.message.reply_text(chunk, parse_mode="Markdown")
 
 async def test_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
