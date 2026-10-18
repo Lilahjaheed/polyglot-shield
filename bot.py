@@ -114,11 +114,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🤖 *Signup Bot*\n\n"
+        "Create accounts automatically on your website.\n\n"
         "Commands:\n"
-        "/newuser - Auto create account\n"
-        "/list - View all accounts\n"
-        "/test - Test browser connection\n"
-        "/seturl <url> - Change website URL",
+        "/newuser - Auto create new account\n"
+        "/list - View all created accounts\n"
+        "/test - Test connection to website\n"
+        "/seturl <url> - Change website URL\n"
+        "/config - View current settings",
         parse_mode="Markdown"
     )
 
@@ -208,6 +210,19 @@ async def set_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✅ URL updated: {WEBSITE_URL}")
 
+async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != OWNER_ID:
+        return
+    
+    await update.message.reply_text(
+        f"⚙️ *Current Settings*\n\n"
+        f"Website: {WEBSITE_URL}\n"
+        f"Referral: {REFERRAL_CODE}\n"
+        f"Name pool: {len(NAME_POOL)} names\n"
+        f"Accounts created: {len(users)}",
+        parse_mode="Markdown"
+    )
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -227,14 +242,25 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
+async def post_init(app):
+    """Set bot commands menu."""
+    await app.bot.set_my_commands([
+        BotCommand("newuser", "Auto create new account"),
+        BotCommand("list", "View all created accounts"),
+        BotCommand("test", "Test connection to website"),
+        BotCommand("seturl", "Change website URL"),
+        BotCommand("config", "View current settings"),
+    ])
+
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newuser", new_user))
     app.add_handler(CommandHandler("list", list_users))
     app.add_handler(CommandHandler("test", test_connection))
     app.add_handler(CommandHandler("seturl", set_url))
+    app.add_handler(CommandHandler("config", show_config))
 
     threading.Thread(target=run_health_server, daemon=True).start()
 
