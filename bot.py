@@ -2,9 +2,10 @@ import os
 import json
 import random
 import logging
+import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -79,28 +80,28 @@ def generate_password():
     length = random.randint(10, 14)
     return "".join(random.choice(chars) for _ in range(length))
 
-def signup_on_website(full_name, phone, email, password):
+async def signup_on_website(full_name, phone, email, password):
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(WEBSITE_URL, timeout=30000)
-            page.wait_for_timeout(2000)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(WEBSITE_URL, timeout=30000)
+            await page.wait_for_timeout(2000)
             
-            page.fill(f"input[placeholder*='Full name'], input[name*='name'], input#name", full_name)
-            page.fill(f"input[placeholder*='Phone'], input[name*='phone'], input[type='tel']", phone)
-            page.fill(f"input[placeholder*='Email'], input[name*='email'], input[type='email']", email)
-            page.fill(f"input[placeholder*='Password'], input[name*='password'], input[type='password']", password)
+            await page.fill(f"input[placeholder*='Full name'], input[name*='name'], input#name", full_name)
+            await page.fill(f"input[placeholder*='Phone'], input[name*='phone'], input[type='tel']", phone)
+            await page.fill(f"input[placeholder*='Email'], input[name*='email'], input[type='email']", email)
+            await page.fill(f"input[placeholder*='Password'], input[name*='password'], input[type='password']", password)
             
             if REFERRAL_CODE:
                 try:
-                    page.fill(f"input[placeholder*='Referral'], input[name*='referral']", REFERRAL_CODE)
+                    await page.fill(f"input[placeholder*='Referral'], input[name*='referral']", REFERRAL_CODE)
                 except Exception:
                     pass
             
-            page.click(f"button:has-text('Create account'), button[type='submit']")
-            page.wait_for_timeout(5000)
-            browser.close()
+            await page.click(f"button:has-text('Create account'), button[type='submit']")
+            await page.wait_for_timeout(5000)
+            await browser.close()
             return True, "Account created!"
             
     except Exception as e:
@@ -132,7 +133,7 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = generate_email()
     password = generate_password()
     
-    success, message = signup_on_website(full_name, phone, email, password)
+    success, message = await signup_on_website(full_name, phone, email, password)
     
     if success:
         users[email] = {
@@ -178,12 +179,12 @@ async def test_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Testing connection...")
     
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(WEBSITE_URL, timeout=15000)
-            title = page.title()
-            browser.close()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(WEBSITE_URL, timeout=15000)
+            title = await page.title()
+            await browser.close()
             await update.message.reply_text(
                 f"✅ Connected!\n\nWebsite: {WEBSITE_URL}\nTitle: {title}"
             )
