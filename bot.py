@@ -1,8 +1,11 @@
+BOT_VERSION = "3.0"
+
 import os
 import json
 import random
 import logging
 import asyncio
+import subprocess
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from playwright.async_api import async_playwright
@@ -44,6 +47,18 @@ def save_users(users):
 
 users = load_users()
 
+def ensure_chromium():
+    """Make sure Chromium is installed."""
+    try:
+        subprocess.run(
+            ["python", "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            timeout=120
+        )
+        logger.info("Chromium ensured")
+    except Exception as e:
+        logger.error(f"Chromium install error: {e}")
+
 def generate_full_name():
     return random.choice(NAME_POOL)
 
@@ -83,7 +98,10 @@ def generate_password():
 async def signup_on_website(full_name, phone, email, password):
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            )
             page = await browser.new_page()
             await page.goto(WEBSITE_URL, timeout=30000)
             await page.wait_for_timeout(2000)
@@ -113,7 +131,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text(
-        "🤖 *Signup Bot*\n\n"
+        f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
         "Create accounts automatically on your website.\n\n"
         "Commands:\n"
         "/newuser - Auto create new account\n"
@@ -128,7 +146,7 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
         return
     
-    await update.message.reply_text("🔄 Creating account...")
+    await update.message.reply_text(f"🔄 Creating account... (v{BOT_VERSION})")
     
     full_name = generate_full_name()
     phone = generate_phone()
@@ -146,7 +164,7 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save_users(users)
         await update.message.reply_text(
-            f"✅ *Account Created!*\n\n"
+            f"✅ *Account Created! (v{BOT_VERSION})*\n\n"
             f"Name: {full_name}\n"
             f"Phone: {phone}\n"
             f"Email: `{email}`\n"
@@ -165,7 +183,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No accounts yet.")
         return
     
-    msg = "📋 *Accounts*\n\n"
+    msg = f"📋 *Accounts (v{BOT_VERSION})*\n\n"
     for email, data in users.items():
         msg += f"• {data.get('full_name', 'Unknown')}\n"
         msg += f"  📧 {email}\n"
@@ -178,17 +196,20 @@ async def test_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
         return
     
-    await update.message.reply_text("🔄 Testing connection...")
+    await update.message.reply_text(f"🔄 Testing... (v{BOT_VERSION})")
     
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox"]
+            )
             page = await browser.new_page()
             await page.goto(WEBSITE_URL, timeout=15000)
             title = await page.title()
             await browser.close()
             await update.message.reply_text(
-                f"✅ Connected!\n\nWebsite: {WEBSITE_URL}\nTitle: {title}"
+                f"✅ Connected! (v{BOT_VERSION})\n\nWebsite: {WEBSITE_URL}\nTitle: {title}"
             )
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {str(e)}")
@@ -215,7 +236,7 @@ async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text(
-        f"⚙️ *Current Settings*\n\n"
+        f"⚙️ *Settings (v{BOT_VERSION})*\n\n"
         f"Website: {WEBSITE_URL}\n"
         f"Referral: {REFERRAL_CODE}\n"
         f"Name pool: {len(NAME_POOL)} names\n"
@@ -253,6 +274,9 @@ async def post_init(app):
     ])
 
 def main():
+    # Ensure Chromium is installed before starting
+    ensure_chromium()
+    
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -264,7 +288,7 @@ def main():
 
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    print("🤖 Signup Bot is running...")
+    print(f"🤖 Signup Bot v{BOT_VERSION} is running...")
     app.run_polling()
 
 if __name__ == "__main__":
