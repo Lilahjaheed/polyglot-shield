@@ -1,4 +1,4 @@
-BOT_VERSION = "4.3"
+BOT_VERSION = "4.4"
 
 import os
 import re
@@ -226,7 +226,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         progress_lock = asyncio.Lock()
         
         def progress_text():
-            txt = f"🔄 *Creating accounts... (v{BOT_VERSION})*\n\n"
+            stopping = JOB["event"] is not None and JOB["event"].is_set()
+            header = f"⏹ *STOPPED — finishing up... (v{BOT_VERSION})*" if stopping else f"🔄 *Creating accounts... (v{BOT_VERSION})*"
+            txt = f"{header}\n\n"
             txt += f"Progress: {status['done']}/{status['total']}\n"
             txt += f"✅ Created: {len(status['created'])}   ❌ Failed: {status['failed']}\n"
             if status["created"]:
@@ -239,6 +241,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     txt += f"  ❌ {e}\n"
             return txt
         
+        def safe_text(t):
+            # Strip Markdown-dangerous chars so Telegram never rejects the message
+            return re.sub(r'([_*`\[\]])', r'\\\1', t)
+        
         status = {"done": 0, "created": [], "failed": 0, "total": count, "errors": []}
         
         await query.edit_message_text(progress_text(), reply_markup=stop_btn, parse_mode="Markdown")
@@ -246,15 +252,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sem = asyncio.Semaphore(2)
         last_edit = [0.0]
         
-        async def live_update():
+        async def live_update(force=False):
             async with progress_lock:
                 now = asyncio.get_event_loop().time()
-                if (now - last_edit[0]) >= 2.0:
+                if force or (now - last_edit[0]) >= 2.0:
                     last_edit[0] = now
+                    stopping = JOB["event"] is not None and JOB["event"].is_set()
+                    markup = None if stopping else stop_btn
                     try:
-                        await query.edit_message_text(progress_text(), reply_markup=stop_btn, parse_mode="Markdown")
+                        await query.edit_message_text(progress_text(), reply_markup=markup, parse_mode="Markdown")
                     except Exception:
-                        pass
+                        try:
+                            await query.edit_message_text(safe_text(progress_text()), reply_markup=markup)
+                        except Exception:
+                            pass
         
         async def make_one(i):
             if JOB["event"].is_set():
@@ -269,7 +280,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 success, message, final_email, final_phone = await signup_on_website(full_name, phone, email, password)
                 
-                if success and not JOB["event"].is_set():
+                if success:
                     users[final_email] = {
                         "full_name": full_name,
                         "username": username,
@@ -283,7 +294,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status["failed"] += 1
                     status["errors"].append(f"{final_email}: {message}")
                 status["done"] += 1
-                await live_update()
+                await live_update(force=True)
         
         await asyncio.gather(*[make_one(i) for i in range(count)])
         
@@ -291,7 +302,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         JOB["active"] = False
         JOB["event"] = None
         
-        result = f"{'⏹ Stopped early' if cancelled else '✅ Done!'} *({BOT_VERSION})*\n\n"
+        result = f"{'⏹ STOPPED' if cancelled else '✅ Done!'} *({BOT_VERSION})*\n\n"
         result += f"Created: {len(status['created'])}\n"
         if status["failed"] > 0:
             result += f"Failed: {status['failed']}\n"
@@ -311,14 +322,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for e in status["errors"][:10]:
                 result += f"  ❌ {e}\n"
         
-        await query.edit_message_text(result, parse_mode="Markdown")
+        # Fail-safe: never lose the final report
+        try:
+            await query.edit_message_text(result, parse_mode="Markdown")
+        except Exception:
+            try:
+                await query.edit_message_text(safe_text(result))
+            except Exception:
+                try:
+                    await query.message.reply_text(re.sub(r'\\[*_`\[\]]', '', result))
+                except Exception:
+                    pass
     
     elif data == "stop_job":
         if JOB.get("event") and not JOB["event"].is_set():
             JOB["event"].set()
-            await query.answer("⏹ Stopping... finishing current, skipping the rest")
+            await query.answer("⏹ STOPPED! Queued accounts cancelled.", show_alert=True)
             try:
-                await query.edit_message_text(f"⏹ *Stopping... (v{BOT_VERSION})*\n\nWaiting for in-flight accounts...", parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"⏹ *STOPPED (v{BOT_VERSION})*\n\n"
+                    "Waiting for the 1-2 in-flight accounts to finish...\n"
+                    "Remaining accounts were cancelled.",
+                    parse_mode="Markdown"
+                )
             except Exception:
                 pass
         else:
