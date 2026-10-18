@@ -1,4 +1,4 @@
-BOT_VERSION = "3.1"
+BOT_VERSION = "3.3"
 
 import os
 import json
@@ -282,7 +282,11 @@ def run_health_server():
 
 async def post_init(app):
     """Set bot commands menu."""
+    # Delete old commands first
+    await app.bot.delete_my_commands()
+    # Set new commands
     await app.bot.set_my_commands([
+        BotCommand("start", "Show bot info"),
         BotCommand("newuser", "Auto create new account"),
         BotCommand("list", "View all created accounts"),
         BotCommand("test", "Test connection to website"),
