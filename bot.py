@@ -1,4 +1,4 @@
-BOT_VERSION = "4.1"
+BOT_VERSION = "4.2"
 
 import os
 import json
@@ -46,6 +46,9 @@ def save_users(users):
         json.dump(users, f, indent=2)
 
 users = load_users()
+
+# Current batch job state (for parallel creation + stop button)
+JOB = {"active": False, "event": None}
 
 def ensure_chromium():
     """Make sure Chromium is installed."""
@@ -200,45 +203,105 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith("create_"):
         count = int(data.split("_")[1])
-        await query.edit_message_text(f"🔄 Creating {count} account(s)... Please wait...")
         
-        created = []
-        failed = 0
+        if JOB.get("active"):
+            await query.answer("⚠️ A batch is already running!", show_alert=True)
+            return
         
-        for i in range(count):
-            full_name = generate_full_name()
-            phone = generate_phone()
-            username, email = generate_matching_name()
-            password = generate_password()
-            
-            success, message = await signup_on_website(full_name, phone, email, password)
-            
-            if success:
-                users[email] = {
-                    "full_name": full_name,
-                    "phone": phone,
-                    "password": password,
-                    "status": "active"
-                }
-                created.append(email)
-                save_users(users)
-            else:
-                failed += 1
+        JOB["active"] = True
+        JOB["event"] = asyncio.Event()
         
-        result = f"✅ *Done! (v{BOT_VERSION})*\n\n"
-        result += f"Created: {len(created)}\n"
-        if failed > 0:
-            result += f"Failed: {failed}\n"
+        stop_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Stop", callback_data="stop_job")]])
+        status = {"done": 0, "created": [], "failed": 0, "total": count}
+        progress_lock = asyncio.Lock()
+        
+        def progress_text():
+            txt = f"🔄 *Creating accounts... (v{BOT_VERSION})*\n\n"
+            txt += f"Progress: {status['done']}/{status['total']}\n"
+            txt += f"✅ Created: {len(status['created'])}   ❌ Failed: {status['failed']}\n"
+            if status["created"]:
+                txt += "\n*Latest:*\n"
+                for e in status["created"][-5:]:
+                    txt += f"  • `{e}`\n"
+            return txt
+        
+        await query.edit_message_text(progress_text(), reply_markup=stop_btn, parse_mode="Markdown")
+        
+        sem = asyncio.Semaphore(2)
+        last_edit = [0.0]
+        
+        async def live_update():
+            async with progress_lock:
+                now = asyncio.get_event_loop().time()
+                if (now - last_edit[0]) >= 2.0:
+                    last_edit[0] = now
+                    try:
+                        await query.edit_message_text(progress_text(), reply_markup=stop_btn, parse_mode="Markdown")
+                    except Exception:
+                        pass
+        
+        async def make_one(i):
+            if JOB["event"].is_set():
+                return
+            async with sem:
+                if JOB["event"].is_set():
+                    return
+                full_name = generate_full_name()
+                phone = generate_phone()
+                username, email = generate_matching_name()
+                password = generate_password()
+                
+                success, message = await signup_on_website(full_name, phone, email, password)
+                
+                if success and not JOB["event"].is_set():
+                    users[email] = {
+                        "full_name": full_name,
+                        "username": username,
+                        "phone": phone,
+                        "password": password,
+                        "status": "active"
+                    }
+                    status["created"].append(email)
+                    save_users(users)
+                else:
+                    status["failed"] += 1
+                status["done"] += 1
+                await live_update()
+        
+        await asyncio.gather(*[make_one(i) for i in range(count)])
+        
+        cancelled = JOB["event"].is_set()
+        JOB["active"] = False
+        JOB["event"] = None
+        
+        result = f"{'⏹ Stopped early' if cancelled else '✅ Done!'} *({BOT_VERSION})*\n\n"
+        result += f"Created: {len(status['created'])}\n"
+        if status["failed"] > 0:
+            result += f"Failed: {status['failed']}\n"
+        if cancelled:
+            result += f"Skipped: {status['total'] - status['done']}\n"
         result += f"Total accounts: {len(users)}\n\n"
         
-        if created:
+        if status["created"]:
             result += "*Accounts:*\n"
-            for email in created[:10]:  # Show first 10
-                result += f"• `{email}`\n"
-            if len(created) > 10:
-                result += f"... and {len(created) - 10} more"
+            for e in status["created"][:15]:
+                result += f"  • `{e}`\n"
+            if len(status["created"]) > 15:
+                result += f"  ... and {len(status['created']) - 15} more"
         
         await query.edit_message_text(result, parse_mode="Markdown")
+    
+    elif data == "stop_job":
+        if JOB.get("event") and not JOB["event"].is_set():
+            JOB["event"].set()
+            await query.answer("⏹ Stopping... finishing current, skipping the rest")
+            try:
+                await query.edit_message_text(f"⏹ *Stopping... (v{BOT_VERSION})*\n\nWaiting for in-flight accounts...", parse_mode="Markdown")
+            except Exception:
+                pass
+        else:
+            await query.answer("No running batch.")
+        return
     
     elif data == "view_accounts":
         if not users:
