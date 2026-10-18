@@ -1,4 +1,4 @@
-BOT_VERSION = "3.0"
+BOT_VERSION = "3.1"
 
 import os
 import json
@@ -23,7 +23,7 @@ with open(CONFIG_PATH, "r") as f:
 BOT_TOKEN = config.get("bot_token", os.environ.get("BOT_TOKEN", ""))
 GEMINI_API_KEY = config.get("gemini_api_key", os.environ.get("GEMINI_API_KEY", ""))
 OWNER_ID = config.get("owner_id", 6416848944)
-WEBSITE_URL = config.get("website_url", "")
+WEBSITE_URL = config.get("website_url", "https://readersbuck.com/register?invite=0fc8fbfb")
 REFERRAL_CODE = config.get("referral_code", "0fc8fbfb")
 NAME_POOL = config.get("name_pool", ["John Doe"])
 
@@ -106,20 +106,24 @@ async def signup_on_website(full_name, phone, email, password):
             await page.goto(WEBSITE_URL, timeout=30000)
             await page.wait_for_timeout(2000)
             
-            await page.fill(f"input[placeholder*='Full name'], input[name*='name'], input#name", full_name)
-            await page.fill(f"input[placeholder*='Phone'], input[name*='phone'], input[type='tel']", phone)
-            await page.fill(f"input[placeholder*='Email'], input[name*='email'], input[type='email']", email)
-            await page.fill(f"input[placeholder*='Password'], input[name*='password'], input[type='password']", password)
+            # Fill using exact selectors from readersbuck.com
+            await page.fill("#name", full_name)
+            await page.fill("#phone", phone)
+            await page.fill("#email", email)
+            await page.fill("#password", password)
             
-            if REFERRAL_CODE:
-                try:
-                    await page.fill(f"input[placeholder*='Referral'], input[name*='referral']", REFERRAL_CODE)
-                except Exception:
-                    pass
-            
-            await page.click(f"button:has-text('Create account'), button[type='submit']")
+            # Referral is readonly, already pre-filled with 0fc8fbfb
+            # Click Create account button
+            await page.click("#submitBtn")
             await page.wait_for_timeout(5000)
+            
+            # Check if account was created
+            page_content = await page.content()
             await browser.close()
+            
+            if "invalid" in page_content.lower() or "error" in page_content.lower():
+                return False, "Website rejected the signup"
+            
             return True, "Account created!"
             
     except Exception as e:
