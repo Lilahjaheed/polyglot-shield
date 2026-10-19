@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Signup Bot Dashboard</title>
+<style>
+:root {
+  --bg: #0f172a; --card: #1e293b; --border: #334155;
+  --text: #e2e8f0; --muted: #94a3b8;
+  --green: #22c55e; --green-d: #16a34a;
+  --red: #ef4444; --red-d: #dc2626;
+  --blue: #3b82f6; --blue-d: #2563eb;
+  --yellow: #eab308;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg); color: var(--text); min-height: 100vh; padding: 16px;
+  max-width: 480px; margin: 0 auto;
+}
+h1 { font-size: 20px; margin-bottom: 4px; }
+.sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; padding: 16px; margin-bottom: 12px;
+}
+.stats { display: flex; gap: 12px; flex-wrap: wrap; }
+.stat { flex: 1; min-width: 90px; text-align: center; }
+.stat .num { font-size: 22px; font-weight: 700; }
+.stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+button {
+  border: none; border-radius: 10px; padding: 12px 8px;
+  font-size: 14px; font-weight: 600; cursor: pointer; color: #fff;
+  transition: transform .1s, opacity .15s; width: 100%;
+}
+button:active { transform: scale(.96); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+.btn-green { background: var(--green); } .btn-green:active { background: var(--green-d); }
+.btn-red { background: var(--red); } .btn-red:active { background: var(--red-d); }
+.btn-blue { background: var(--blue); } .btn-blue:active { background: var(--blue-d); }
+.btn-dark { background: var(--border); }
+.progress-wrap { background: #0b1220; border-radius: 8px; height: 14px; overflow: hidden; margin: 10px 0; }
+.progress-bar { background: linear-gradient(90deg, var(--blue), var(--green)); height: 100%; width: 0%; transition: width .4s; }
+.log { font-size: 12px; max-height: 160px; overflow-y: auto; font-family: monospace; }
+.log div { padding: 2px 0; border-bottom: 1px solid #222; }
+.ok { color: var(--green); } .err { color: var(--red); }
+label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+input[type=text], select {
+  width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: #0b1220; color: var(--text); font-size: 14px;
+}
+.switch { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
+.switch label { margin: 0; font-size: 14px; color: var(--text); }
+.toggle { position: relative; width: 52px; height: 28px; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; inset: 0; background: var(--red); border-radius: 28px;
+  cursor: pointer; transition: .3s;
+}
+.slider:before {
+  content: ""; position: absolute; height: 22px; width: 22px; left: 3px; bottom: 3px;
+  background: #fff; border-radius: 50%; transition: .3s;
+}
+.toggle input:checked + .slider { background: var(--green); }
+.toggle input:checked + .slider:before { transform: translateX(24px); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; }
+.badge-on { background: rgba(34,197,94,.2); color: var(--green); }
+.badge-off { background: rgba(239,68,68,.2); color: var(--red); }
+.accounts { max-height: 220px; overflow-y: auto; font-size: 12px; }
+.accounts .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.muted { color: var(--muted); }
+.toast {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: var(--card); border: 1px solid var(--border); padding: 10px 18px;
+  border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none;
+}
+.toast.show { opacity: 1; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>🤖 Signup Bot</h1>
+<div class="sub">v<span id="ver">…</span> · <span id="engine">…</span> · <span id="url" class="muted">…</span></div>
+
+<div class="card">
+  <div class="stats">
+    <div class="stat"><div class="num" id="totalAcc">0</div><div class="lbl">Accounts</div></div>
+    <div class="stat"><div class="num" id="doneN">0</div><div class="lbl">Done</div></div>
+    <div class="stat"><div class="num ok" id="okN">0</div><div class="lbl">Created</div></div>
+    <div class="stat"><div class="num err" id="failN">0</div><div class="lbl">Failed</div></div>
+  </div>
+  <div class="progress-wrap"><div class="progress-bar" id="pbar"></div></div>
+  <div class="log" id="log"><div class="muted">No activity yet.</div></div>
+</div>
+
+<div class="card">
+  <div class="grid3">
+    <button class="btn-green" onclick="start(1)">+1</button>
+    <button class="btn-green" onclick="start(5)">+5</button>
+    <button class="btn-green" onclick="start(10)">+10</button>
+  </div>
+  <div class="grid" style="margin-top:8px">
+    <button class="btn-green" onclick="start(20)">+20</button>
+    <button class="btn-green" onclick="start(50)">+50</button>
+  </div>
+  <button class="btn-red" id="stopBtn" style="margin-top:8px" onclick="stopJob()">🛑 Stop</button>
+</div>
+
+<div class="card">
+  <b>⚙️ Settings</b>
+  <div class="switch">
+    <label>Auto-OTP <span id="otpBadge" class="badge badge-off">OFF</span></label>
+    <div class="toggle"><input type="checkbox" id="otpToggle" onchange="saveOtp()"><span class="slider"></span></div>
+  </div>
+  <label>Region</label>
+  <select id="regionSel" onchange="saveRegion()">
+    <option value="nigeria">🇳🇬 Nigeria</option>
+    <option value="usa">🇺🇸 USA</option>
+    <option value="uk">🇬🇧 UK</option>
+    <option value="ghana">🇬🇭 Ghana</option>
+    <option value="kenya">🇰🇪 Kenya</option>
+    <option value="south_africa">🇿🇦 South Africa</option>
+    <option value="canada">🇨🇦 Canada</option>
+    <option value="india">🇮🇳 India</option>
+    <option value="uae">🇦🇪 UAE</option>
+    <option value="germany">🇩🇪 Germany</option>
+  </select>
+  <label>Website URL</label>
+  <input type="text" id="siteUrl" placeholder="https://...">
+  <button class="btn-blue" style="margin-top:10px" onclick="saveUrl()">💾 Save URL</button>
+</div>
+
+<div class="card">
+  <b>📋 Accounts</b>
+  <div class="accounts" id="accounts"><div class="muted">Loading…</div></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const T = new URLSearchParams(location.search).get('t') || '';
+const api = (path, opts={}) => fetch('/api/'+path+(path.includes('?')?'&':'?')+'t='+encodeURIComponent(T), opts);
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'), 2200);
+}
+
+async function loadStatus() {
+  try {
+    const r = await api('status'); if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('ver').textContent = d.version;
+    document.getElementById('engine').textContent = d.engine;
+    document.getElementById('url').textContent = d.url;
+    document.getElementById('totalAcc').textContent = d.total_accounts;
+    document.getElementById('doneN').textContent = d.job?.done ?? 0;
+    document.getElementById('okN').textContent = d.job?.created?.length ?? 0;
+    document.getElementById('failN').textContent = d.job?.failed ?? 0;
+    const total = d.job?.total || 0, done = d.job?.done || 0;
+    document.getElementById('pbar').style.width = total ? (done/total*100)+'%' : '0%';
+    const log = document.getElementById('log');
+    if (d.job?.active) {
+      log.innerHTML = '';
+      (d.job.created||[]).slice(-5).forEach(e => log.innerHTML += '<div class="ok">✅ '+esc(e)+'</div>');
+      (d.job.errors||[]).slice(-5).forEach(e => log.innerHTML += '<div class="err">❌ '+esc(e)+'</div>');
+      if (!log.innerHTML) log.innerHTML = '<div class="muted">Working…</div>';
+    }
+    document.getElementById('otpToggle').checked = !!d.auto_otp;
+    const badge = document.getElementById('otpBadge');
+    badge.textContent = d.auto_otp ? 'ON' : 'OFF';
+    badge.className = 'badge '+(d.auto_otp?'badge-on':'badge-off');
+    if (!document.getElementById('regionSel').dataset.touched)
+      document.getElementById('regionSel').value = d.region;
+    if (!document.getElementById('siteUrl').dataset.touched)
+      document.getElementById('siteUrl').value = d.url;
+    document.querySelectorAll('.btn-green').forEach(b => b.disabled = !!d.job?.active);
+    document.getElementById('stopBtn').disabled = !d.job?.active;
+  } catch(e) {}
+}
+
+async function loadAccounts() {
+  try {
+    const r = await api('accounts'); if (!r.ok) return;
+    const d = await r.json();
+    const el = document.getElementById('accounts');
+    const keys = Object.keys(d.accounts||{});
+    if (!keys.length) { el.innerHTML = '<div class="muted">No accounts yet.</div>'; return; }
+    el.innerHTML = keys.slice().reverse().map(k => {
+      const a = d.accounts[k];
+      return '<div class="row"><span>'+esc(a.full_name||'')+'</span><span class="muted">'+esc(k)+'</span></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+function esc(s){ return String(s).replace(/[<>&"]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+
+async function start(n) {
+  const r = await api('start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({count:n})});
+  const d = await r.json();
+  toast(d.message || 'Started');
+  setTimeout(loadStatus, 500);
+}
+async function stopJob() {
+  await api('stop', {method:'POST'});
+  toast('Stopping…');
+}
+async function saveOtp() {
+  const v = document.getElementById('otpToggle').checked;
+  await api('settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({auto_otp:v})});
+  toast(v ? '🟢 Auto-OTP ON' : '🔴 Auto-OTP OFF');
+  loadStatus();
+}
+async function saveRegion() {
+  const v = document.getElementById('regionSel').value;
+  document.getElementById('regionSel').dataset.touched = '1';
+  await api('settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({region:v})});
+  toast('🌍 Region saved');
+}
+async function saveUrl() {
+  const v = document.getElementById('siteUrl').value.trim();
+  if (!v) return toast('Enter a URL');
+  document.getElementById('siteUrl').dataset.touched = '1';
+  await api('settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url:v})});
+  toast('💾 URL saved');
+}
+
+loadStatus(); loadAccounts();
+setInterval(loadStatus, 2000);
+setInterval(loadAccounts, 8000);
+</script>
+</body>
+</html>

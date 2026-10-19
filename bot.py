@@ -1,4 +1,4 @@
-BOT_VERSION = "5.8"
+BOT_VERSION = "5.9"
 
 import os
 import re
@@ -10,8 +10,11 @@ import subprocess
 import threading
 import string
 import time
+import hmac
+import hashlib
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 # Patchright = hardened Playwright fork (harder for sites to detect bots)
 try:
@@ -21,7 +24,7 @@ except ImportError:
     from playwright.async_api import async_playwright
     BROWSER_ENGINE = "playwright"
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
@@ -45,6 +48,17 @@ ACTIVE_REGION = config.get("region", "nigeria")
 # Auto-OTP mode: True = temp email (mail.tm), reads OTP automatically.
 # False = your own email (OVERRIDE_EMAIL), you send me the code.
 AUTO_OTP = config.get("auto_otp", False)
+
+# Web dashboard token (generated once, stored in config). Only you have the link.
+WEB_TOKEN = config.get("web_token", "")
+if not WEB_TOKEN:
+    WEB_TOKEN = "".join(random.choices(string.ascii_letters + string.digits, k=32))
+    config["web_token"] = WEB_TOKEN
+    with open(CONFIG_PATH, "w") as _f:
+        json.dump(config, _f, indent=2)
+
+# Filled in main() — lets the HTTP thread schedule work on the bot's event loop
+BOT_LOOP = None
 
 REGIONS = {
     "nigeria":  {"label": "🇳🇬 Nigeria",     "tz": "Africa/Lagos",        "locale": "en-NG", "ua_loc": "NG", "geo": (6.5244, 3.3792)},
@@ -758,6 +772,9 @@ def main_menu_keyboard():
                 callback_data="toggle_auto_otp"
             ),
         ],
+        [
+            InlineKeyboardButton("🌐 Open App", web_app=WebAppInfo(url=_app_url())),
+        ],
     ]
 
 def main_menu_text():
@@ -1390,9 +1407,10 @@ async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Email: {OVERRIDE_EMAIL if OVERRIDE_EMAIL else 'random (auto)'}\n"
         f"Region: {r['label']} ({r['tz']})\n"
         f"Browser: {BROWSER_ENGINE}\n"
-        f"Referral: {REFERRAL_CODE}\n"
+        f"Referral: `{REFERRAL_CODE}`\n"
         f"Name pool: {len(NAME_POOL)} names\n"
-        f"Accounts created: {len(users)}",
+        f"Accounts created: {len(users)}\n\n"
+        f"🌐 Web App:\n`{_app_url()}`",
         parse_mode="Markdown"
     )
 
@@ -1448,17 +1466,183 @@ async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+# ---------- Web dashboard API (Telegram Mini App) ----------
+WEB_STATUS = {"done": 0, "created": [], "failed": 0, "total": 0, "errors": [], "active": False}
+DASHBOARD_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
+
+def _render_base_url():
+    return os.environ.get("RENDER_EXTERNAL_URL", "https://polyglot-shield.onrender.com")
+
+def _app_url():
+    return f"{_render_base_url()}/?t={WEB_TOKEN}"
+
+async def web_run_batch(count):
+    """Run an account batch for the web dashboard (no Telegram messages)."""
+    if JOB.get("active") or WEB_STATUS.get("active"):
+        return False
+    JOB["active"] = True
+    WEB_STATUS.update({"done": 0, "created": [], "failed": 0, "total": count, "errors": [], "active": True})
+    JOB["event"] = asyncio.Event()
+    sem = asyncio.Semaphore(1)
+    
+    async def one(i):
+        if JOB["event"].is_set():
+            return
+        async with sem:
+            if JOB["event"].is_set():
+                return
+            full_name = generate_full_name()
+            phone = generate_phone()
+            username, email = generate_unique_name()
+            password = generate_password()
+            otp_token = None
+            if AUTO_OTP:
+                temp_email, otp_token = await create_temp_inbox()
+                if not temp_email:
+                    WEB_STATUS["failed"] += 1
+                    WEB_STATUS["errors"].append(f"{email}: temp inbox unavailable")
+                    WEB_STATUS["done"] += 1
+                    return
+                email = temp_email
+            success, message, final_email, final_phone = await signup_on_website(
+                full_name, phone, email, password, otp_token=otp_token)
+            if success:
+                users[final_email] = {
+                    "full_name": full_name, "username": username,
+                    "phone": final_phone, "password": password, "status": "active"
+                }
+                WEB_STATUS["created"].append(final_email)
+                save_users(users)
+            else:
+                WEB_STATUS["failed"] += 1
+                WEB_STATUS["errors"].append(f"{final_email}: {message}")
+            WEB_STATUS["done"] += 1
+    
+    try:
+        await asyncio.gather(*[one(i) for i in range(count)])
+    finally:
+        JOB["active"] = False
+        JOB["event"] = None
+        WEB_STATUS["active"] = False
+    return True
+
+def _json_response(handler, code, obj):
+    body = json.dumps(obj).encode()
+    handler.send_response(code)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+def _authorized(handler):
+    parsed = urlparse(handler.path)
+    qs = parse_qs(parsed.query)
+    token = (qs.get("t") or [""])[0]
+    return hmac.compare_digest(token, WEB_TOKEN)
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        # Health check (UptimeRobot) — no auth
+        if path in ("/", "/health", "/healthz"):
+            if path == "/" and _authorized(self):
+                return self._serve_dashboard()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+            return
+        
+        if path == "/app":
+            return self._serve_dashboard()
+        
+        if not _authorized(self):
+            return _json_response(self, 401, {"error": "unauthorized"})
+        
+        if path == "/api/status":
+            return _json_response(self, 200, {
+                "version": BOT_VERSION,
+                "engine": BROWSER_ENGINE,
+                "url": WEBSITE_URL,
+                "region": ACTIVE_REGION,
+                "auto_otp": AUTO_OTP,
+                "total_accounts": len(users),
+                "job": WEB_STATUS,
+            })
+        
+        if path == "/api/accounts":
+            return _json_response(self, 200, {"accounts": users})
+        
+        return _json_response(self, 404, {"error": "not found"})
+    
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        if not _authorized(self):
+            return _json_response(self, 401, {"error": "unauthorized"})
+        
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(raw or b"{}")
+        except Exception:
+            data = {}
+        
+        global AUTO_OTP, ACTIVE_REGION, WEBSITE_URL
+        
+        if path == "/api/start":
+            count = int(data.get("count", 1))
+            count = max(1, min(count, 100))
+            if BOT_LOOP is None:
+                return _json_response(self, 503, {"message": "Bot loop not ready"})
+            if JOB.get("active") or WEB_STATUS.get("active"):
+                return _json_response(self, 409, {"message": "⚠️ A batch is already running"})
+            # Fire and forget — batch runs in background on the bot loop
+            asyncio.run_coroutine_threadsafe(web_run_batch(count), BOT_LOOP)
+            return _json_response(self, 200, {"message": f"🟢 Started creating {count} account(s)", "started": True})
+        
+        if path == "/api/stop":
+            if JOB.get("event"):
+                JOB["event"].set()
+            return _json_response(self, 200, {"message": "🛑 Stop requested"})
+        
+        if path == "/api/settings":
+            if "auto_otp" in data:
+                AUTO_OTP = bool(data["auto_otp"])
+                config["auto_otp"] = AUTO_OTP
+            if "region" in data and data["region"] in REGIONS:
+                ACTIVE_REGION = data["region"]
+                config["region"] = ACTIVE_REGION
+            if "url" in data and str(data["url"]).startswith("http"):
+                WEBSITE_URL = str(data["url"]).strip()
+                config["website_url"] = WEBSITE_URL
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            return _json_response(self, 200, {"message": "💾 Saved", "auto_otp": AUTO_OTP, "region": ACTIVE_REGION, "url": WEBSITE_URL})
+        
+        return _json_response(self, 404, {"error": "not found"})
+    
+    def _serve_dashboard(self):
+        try:
+            with open(DASHBOARD_HTML_PATH, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            self.send_response(500)
+            self.end_headers()
+    
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
-
+    
     def log_message(self, *args):
         pass
 
@@ -1469,6 +1653,8 @@ def run_health_server():
 
 async def post_init(app):
     """Set bot commands menu - clear ALL old scopes from moderation bot."""
+    global BOT_LOOP
+    BOT_LOOP = asyncio.get_running_loop()
     from telegram import BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeAllChatAdministrators
     
     new_commands = [
@@ -1520,6 +1706,7 @@ async def post_init(app):
         print(f"⚠️ Menu update error: {e}")
 
 def main():
+    global BOT_LOOP
     # Ensure Chromium is installed before starting
     ensure_chromium()
     
