@@ -1,0 +1,22 @@
+{
+  "https://readersbuck.com/register?invite=0fc8fbfb": {
+    "fields": {
+      "name": "#name",
+      "phone": "#phone",
+      "email": "#email",
+      "password": "#password",
+      "referral": "#ref"
+    },
+    "submit": "#submitBtn"
+  },
+  "https://readersbuck.com/register": {
+    "fields": {
+      "name": "#name",
+      "phone": "#phone",
+      "email": "#email",
+      "password": "#password",
+      "referral": "#ref"
+    },
+    "submit": "#submitBtn"
+  }
+}
