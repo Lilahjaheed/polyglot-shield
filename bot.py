@@ -1,4 +1,4 @@
-BOT_VERSION = "5.13"
+BOT_VERSION = "5.14"
 
 import os
 import re
@@ -59,6 +59,8 @@ WEB_TOKEN = hashlib.sha256(("polyglot_web:" + BOT_TOKEN).encode()).hexdigest()[:
 
 # Filled in main() — lets the HTTP thread schedule work on the bot's event loop
 BOT_LOOP = None
+# Active browser for the current signup — Stop force-closes it for instant cancel
+CURRENT_BROWSER = {"browser": None}
 
 REGIONS = {
     "nigeria":  {"label": "🇳🇬 Nigeria",     "tz": "Africa/Lagos",        "locale": "en-NG", "ua_loc": "NG", "geo": (6.5244, 3.3792)},
@@ -876,6 +878,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
         try:
             async with async_playwright() as p:
                 browser = await launch_chromium(p)
+                CURRENT_BROWSER["browser"] = browser
                 ctx_proxy = await get_context_proxy()
                 context = await browser.new_context(**region_options(proxy=ctx_proxy))
                 # Hide automation flags from the site
@@ -1090,6 +1093,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
         except Exception as e:
             last_error = f"Error: {str(e)}"
         finally:
+            CURRENT_BROWSER["browser"] = None
             if browser:
                 try:
                     await browser.close()
@@ -1171,9 +1175,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stopped = False
     if JOB.get("active") and JOB.get("event") and not JOB["event"].is_set():
         JOB["event"].set()
+        # Force-close the active browser NOW so the running signup dies instantly
+        b = CURRENT_BROWSER.get("browser")
+        if b:
+            try:
+                await b.close()
+            except Exception:
+                pass
+            CURRENT_BROWSER["browser"] = None
         stopped = True
     
-    header = "⏹ Batch STOPPING — finishing current account...\n\n" if stopped else ""
+    header = "⏹ Batch STOPPED instantly.\n\n" if stopped else ""
     await update.message.reply_text(
         header + main_menu_text(),
         reply_markup=InlineKeyboardMarkup(main_menu_keyboard()),
@@ -1320,7 +1332,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status["done"] += 1
                 await live_update(force=True)
         
-        await asyncio.gather(*[make_one(i) for i in range(count)])
+        # Sequential loop — checks Stop between every account (no task pile-up)
+        for i in range(count):
+            if JOB["event"].is_set():
+                break
+            await make_one(i)
         
         cancelled = JOB["event"].is_set()
         JOB["active"] = False
@@ -1523,12 +1539,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "stop_job":
         if JOB.get("event") and not JOB["event"].is_set():
             JOB["event"].set()
-            await query.answer("⏹ STOPPED! Queued accounts cancelled.", show_alert=True)
+            # Force-close the active browser NOW so the running signup dies instantly
+            b = CURRENT_BROWSER.get("browser")
+            if b:
+                try:
+                    await b.close()
+                except Exception:
+                    pass
+                CURRENT_BROWSER["browser"] = None
+            await query.answer("⏹ STOPPED! Batch cancelled instantly.", show_alert=True)
             try:
                 await query.edit_message_text(
                     f"⏹ *STOPPED (v{BOT_VERSION})*\n\n"
-                    "Waiting for the 1-2 in-flight accounts to finish...\n"
-                    "Remaining accounts were cancelled.",
+                    "All queued accounts cancelled.\n"
+                    "The running signup was force-stopped.",
                     parse_mode="Markdown"
                 )
             except Exception:
@@ -2017,7 +2041,10 @@ async def web_run_batch(count):
             WEB_STATUS["done"] += 1
     
     try:
-        await asyncio.gather(*[one(i) for i in range(count)])
+        for i in range(count):
+            if JOB["event"].is_set():
+                break
+            await one(i)
     finally:
         JOB["active"] = False
         JOB["event"] = None
