@@ -1,4 +1,4 @@
-BOT_VERSION = "5.5"
+BOT_VERSION = "5.6"
 
 import os
 import re
@@ -8,8 +8,19 @@ import logging
 import asyncio
 import subprocess
 import threading
+import string
+import time
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from playwright.async_api import async_playwright
+
+# Patchright = hardened Playwright fork (harder for sites to detect bots)
+try:
+    from patchright.async_api import async_playwright
+    BROWSER_ENGINE = "patchright"
+except ImportError:
+    from playwright.async_api import async_playwright
+    BROWSER_ENGINE = "playwright"
+
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -31,6 +42,9 @@ NAME_POOL = config.get("name_pool", ["John Doe"])
 OVERRIDE_EMAIL = config.get("override_email", "")
 # Region the browser pretends to be in (for geo-blocked sites)
 ACTIVE_REGION = config.get("region", "nigeria")
+# Auto-OTP mode: True = temp email (mail.tm), reads OTP automatically.
+# False = your own email (OVERRIDE_EMAIL), you send me the code.
+AUTO_OTP = config.get("auto_otp", False)
 
 REGIONS = {
     "nigeria":  {"label": "🇳🇬 Nigeria",     "tz": "Africa/Lagos",        "locale": "en-NG", "ua_loc": "NG", "geo": (6.5244, 3.3792)},
@@ -60,6 +74,65 @@ def region_options():
         "viewport": {"width": 1366, "height": 768},
         "extra_http_headers": {"Accept-Language": f"{r['locale']},en;q=0.9"},
     }
+
+# ---------- mail.tm temp inbox (real email, auto OTP reading) ----------
+MAILTM_BASE = "https://api.mail.tm"
+
+async def create_temp_inbox():
+    """Create a real temporary email on mail.tm. Returns (email, token) or (None, None)."""
+    def _create():
+        try:
+            r = requests.get(f"{MAILTM_BASE}/domains", timeout=20)
+            domain = r.json()["hydra:member"][0]["domain"]
+            local = "sbx" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+            email = f"{local}@{domain}"
+            pw = "Sbx!" + "".join(random.choices(string.ascii_letters + string.digits, k=12))
+            r2 = requests.post(f"{MAILTM_BASE}/accounts",
+                              json={"address": email, "password": pw}, timeout=20)
+            if r2.status_code not in (200, 201):
+                return None, None
+            r3 = requests.post(f"{MAILTM_BASE}/token",
+                              json={"address": email, "password": pw}, timeout=20)
+            return email, r3.json().get("token")
+        except Exception as e:
+            logger.error(f"mail.tm create error: {e}")
+            return None, None
+    return await asyncio.get_event_loop().run_in_executor(None, _create)
+
+async def wait_for_otp_email(token, timeout_sec=180, notify=None):
+    """Poll the temp inbox for an OTP code. Returns code string or None."""
+    def _poll():
+        deadline = time.time() + timeout_sec
+        seen = set()
+        while time.time() < deadline:
+            try:
+                r = requests.get(f"{MAILTM_BASE}/messages",
+                                headers={"Authorization": f"Bearer {token}"}, timeout=20)
+                for msg in r.json().get("hydra:member", []):
+                    mid = msg.get("id")
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    # Fetch full message body
+                    r2 = requests.get(f"{MAILTM_BASE}/messages/{mid}",
+                                     headers={"Authorization": f"Bearer {token}"}, timeout=20)
+                    body = r2.json().get("text", "") or ""
+                    html = r2.json().get("html", "")
+                    if isinstance(html, list):
+                        html = " ".join(html)
+                    # Look for a 4-8 digit/char verification code
+                    for pattern in (r'\b(\d{4,8})\b', r'\b([A-Z0-9]{4,8})\b',
+                                    r'code[:\s]+([A-Za-z0-9]{4,8})',
+                                    r'verification[:\s]+([A-Za-z0-9]{4,8})'):
+                        m = re.search(pattern, body + " " + html, re.I)
+                        if m:
+                            return m.group(1)
+            except Exception as e:
+                logger.error(f"mail.tm poll error: {e}")
+            time.sleep(5)
+        return None
+    code = await asyncio.get_event_loop().run_in_executor(None, _poll)
+    return code
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -110,12 +183,13 @@ def ensure_chromium():
         logger.info("Chromium already present - skipping install")
         return
     try:
+        module = "patchright" if BROWSER_ENGINE == "patchright" else "playwright"
         subprocess.run(
-            ["python", "-m", "playwright", "install", "chromium"],
+            ["python", "-m", module, "install", "chromium"],
             capture_output=True,
             timeout=300
         )
-        logger.info("Chromium installed")
+        logger.info(f"Chromium installed via {module}")
     except Exception as e:
         logger.error(f"Chromium install error: {e}")
 
@@ -424,7 +498,8 @@ async def request_otp(bot, chat_id, screenshot_path=None, url=""):
         OTP_WAIT.pop(chat_id, None)
 
 async def signup_on_website(full_name, phone, email, password, max_attempts=3,
-                            otp_chat_id=None, bot=None):
+                            otp_chat_id=None, bot=None, otp_token=None):
+    # otp_token = mail.tm bearer token -> read OTP from temp inbox automatically
     last_error = "Unknown error"
     # Use learned mapping for this URL, or auto-detect live
     learned = load_learned().get(WEBSITE_URL)
@@ -518,7 +593,35 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                     except Exception:
                         pass
                     
-                    if otp_sel and bot and otp_chat_id:
+                    if otp_sel and otp_token:
+                        # Auto-OTP: read the code from the mail.tm temp inbox
+                        code = await wait_for_otp_email(otp_token, timeout_sec=180)
+                        if not code:
+                            await browser.close()
+                            browser = None
+                            return False, "Auto-OTP: no verification email received in 3 min", email, phone
+                        try:
+                            if otp_sel == "TEXT_PROMPT":
+                                for sel in ['input[autocomplete="one-time-code"]', 'input[name*="otp" i]',
+                                            'input[placeholder*="code" i]', 'input[type="tel"]', 'input[type="text"]']:
+                                    try:
+                                        await page.fill(sel, code)
+                                        otp_sel = sel
+                                        break
+                                    except Exception:
+                                        continue
+                            else:
+                                await page.fill(otp_sel, code)
+                            try:
+                                await page.click(submit_sel)
+                            except Exception:
+                                await page.keyboard.press("Enter")
+                            await page.wait_for_timeout(5000)
+                        except Exception as e:
+                            await browser.close()
+                            browser = None
+                            return False, f"OTP fill failed: {str(e)}", email, phone
+                    elif otp_sel and bot and otp_chat_id:
                         otp_shot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_shot.png")
                         try:
                             await page.screenshot(path=otp_shot)
@@ -640,12 +743,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔍 Learn Form", callback_data="ask_learn"),
             InlineKeyboardButton(f"🌍 Region: {REGIONS.get(ACTIVE_REGION, REGIONS['nigeria'])['label']}", callback_data="ask_region"),
         ],
+        [
+            InlineKeyboardButton(
+                f"🤖 Auto-OTP: {'ON ✅' if AUTO_OTP else 'OFF'}",
+                callback_data="toggle_auto_otp"
+            ),
+        ],
     ]
     
     await update.message.reply_text(
         f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
         f"Website: readersbuck.com\n"
-        f"Accounts created: {len(users)}\n\n"
+        f"Accounts created: {len(users)}\n"
+        f"Auto-OTP: {'ON 🤖' if AUTO_OTP else 'OFF (ask me)'}\n"
+        f"Browser: {BROWSER_ENGINE}\n\n"
         f"Select how many accounts to create:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -679,11 +790,19 @@ async def start_from_callback(query):
             InlineKeyboardButton("🔍 Learn Form", callback_data="ask_learn"),
             InlineKeyboardButton(f"🌍 Region: {REGIONS.get(ACTIVE_REGION, REGIONS['nigeria'])['label']}", callback_data="ask_region"),
         ],
+        [
+            InlineKeyboardButton(
+                f"🤖 Auto-OTP: {'ON ✅' if AUTO_OTP else 'OFF'}",
+                callback_data="toggle_auto_otp"
+            ),
+        ],
     ]
     await query.edit_message_text(
         f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
         f"Website: {WEBSITE_URL}\n"
-        f"Accounts created: {len(users)}\n\n"
+        f"Accounts created: {len(users)}\n"
+        f"Auto-OTP: {'ON 🤖' if AUTO_OTP else 'OFF (ask me)'}\n"
+        f"Browser: {BROWSER_ENGINE}\n\n"
         f"Select how many accounts to create:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -766,8 +885,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 phone = generate_phone()
                 username, email = generate_unique_name()
                 password = generate_password()
+                otp_token = None
+                if AUTO_OTP:
+                    # Real temp inbox so OTP emails arrive in a box we can read
+                    temp_email, otp_token = await create_temp_inbox()
+                    if not temp_email:
+                        status["failed"] += 1
+                        status["errors"].append(f"{email}: temp inbox (mail.tm) unavailable")
+                        status["done"] += 1
+                        await live_update(force=True)
+                        return
+                    email = temp_email
                 
-                success, message, final_email, final_phone = await signup_on_website(full_name, phone, email, password)
+                success, message, final_email, final_phone = await signup_on_website(
+                    full_name, phone, email, password, otp_token=otp_token)
                 
                 if success:
                     users[final_email] = {
@@ -823,6 +954,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
     
+    elif data == "toggle_auto_otp":
+        global AUTO_OTP
+        AUTO_OTP = not AUTO_OTP
+        config["auto_otp"] = AUTO_OTP
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+        if AUTO_OTP:
+            await query.answer("Auto-OTP ON — temp email + automatic code reading")
+            await query.edit_message_text(
+                "🤖 *Auto-OTP: ON*\n\n"
+                "I'll create a real temp email (mail.tm) for each account\n"
+                "and read the verification code automatically.\n"
+                "No action needed from you.\n\n"
+                "Use /start to go back.",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.answer("Auto-OTP OFF — I'll ask you for codes")
+            await query.edit_message_text(
+                "🤖 *Auto-OTP: OFF*\n\n"
+                "I'll use your own email (via /setemail) or a random one.\n"
+                "If the site asks for a code, I'll send it to you here.\n\n"
+                "Use /start to go back.",
+                parse_mode="Markdown"
+            )
+        return
+
     elif data == "ask_region":
         rows = []
         row = []
@@ -978,9 +1136,23 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username, email = generate_unique_name()
     password = generate_password()
     
+    otp_token = None
+    otp_chat = None
+    otp_bot = None
+    if AUTO_OTP:
+        temp_email, otp_token = await create_temp_inbox()
+        if not temp_email:
+            await update.message.reply_text("❌ Temp inbox (mail.tm) unavailable — try again or toggle Auto-OTP off.")
+            return
+        email = temp_email
+        await update.message.reply_text(f"📧 Using temp inbox: `{email}`\nOTP will be read automatically.", parse_mode="Markdown")
+    else:
+        otp_chat = update.message.chat_id
+        otp_bot = context.bot
+    
     success, message, final_email, final_phone = await signup_on_website(
         full_name, phone, email, password,
-        otp_chat_id=update.message.chat_id, bot=context.bot
+        otp_chat_id=otp_chat, bot=otp_bot, otp_token=otp_token
     )
     
     if success:
@@ -1219,8 +1391,10 @@ async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚙️ *Settings (v{BOT_VERSION})*\n\n"
         f"Website: {WEBSITE_URL}\n"
         f"Form: {learned_line}\n"
+        f"Auto-OTP: {'ON (mail.tm temp email)' if AUTO_OTP else 'OFF (you send codes)'}\n"
         f"Email: {OVERRIDE_EMAIL if OVERRIDE_EMAIL else 'random (auto)'}\n"
         f"Region: {r['label']} ({r['tz']})\n"
+        f"Browser: {BROWSER_ENGINE}\n"
         f"Referral: {REFERRAL_CODE}\n"
         f"Name pool: {len(NAME_POOL)} names\n"
         f"Accounts created: {len(users)}",

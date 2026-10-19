@@ -3,7 +3,7 @@ services:
     name: polyglot-shield
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
+    buildCommand: pip install -r requirements.txt && python -m patchright install chromium
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
