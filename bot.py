@@ -1,4 +1,4 @@
-BOT_VERSION = "5.7"
+BOT_VERSION = "5.8"
 
 import os
 import re
@@ -194,8 +194,21 @@ def ensure_chromium():
         logger.error(f"Chromium install error: {e}")
 
 async def launch_chromium(p):
-    """Launch headless Chromium with retry on ETXTBSY (binary busy)."""
-    args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    """Launch headless Chromium with retry on ETXTBSY (binary busy).
+    Memory-safe flags for Render free tier (512MB)."""
+    args = [
+        "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+        # Memory savers for the 512MB free instance
+        "--disable-gpu", "--disable-software-rasterizer",
+        "--disable-extensions", "--disable-background-networking",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-features=site-per-process,Translate,BackForwardCache",
+        "--js-flags=--max-old-space-size=128",
+        "--disk-cache-size=1",
+        "--media-cache-size=1",
+        "--no-first-run", "--no-default-browser-check",
+    ]
     if BROWSER_ENGINE != "patchright":
         # patchright handles anti-detection itself; these flags can hurt it
         args.append("--disable-blink-features=AutomationControlled")
@@ -832,7 +845,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(progress_text(), reply_markup=stop_btn, parse_mode="Markdown")
         
-        sem = asyncio.Semaphore(2)
+        # Render free tier = 512MB. One Chromium at a time to avoid OOM restarts.
+        sem = asyncio.Semaphore(1)
         last_edit = [0.0]
         
         async def live_update(force=False):
