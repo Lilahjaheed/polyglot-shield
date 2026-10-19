@@ -1,4 +1,4 @@
-BOT_VERSION = "5.0"
+BOT_VERSION = "5.1"
 
 import os
 import re
@@ -27,6 +27,8 @@ OWNER_ID = config.get("owner_id", 6416848944)
 WEBSITE_URL = config.get("website_url", "https://readersbuck.com/register?invite=0fc8fbfb")
 REFERRAL_CODE = config.get("referral_code", "0fc8fbfb")
 NAME_POOL = config.get("name_pool", ["John Doe"])
+# Fixed email for OTP sites (codes must reach an inbox you control)
+OVERRIDE_EMAIL = config.get("override_email", "")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,6 +52,9 @@ users = load_users()
 
 # Current batch job state (for parallel creation + stop button)
 JOB = {"active": False, "event": None}
+
+# Pending OTP requests: chat_id -> asyncio.Future resolved when owner sends the code
+OTP_WAIT = {}
 
 def ensure_chromium():
     """Make sure Chromium is installed."""
@@ -201,6 +206,25 @@ FIELD_VALUES = {
     "password": "password", "referral": "referral_code"
 }
 
+# Runs inside the page: returns selector of OTP input, or null
+OTP_DETECT_JS = """
+() => {
+  const otpInput = document.querySelector(
+    'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i],' +
+    ' input[placeholder*="otp" i], input[placeholder*="verification" i], input[placeholder*="code sent" i]'
+  );
+  if (otpInput && otpInput.offsetParent !== null) {
+    return otpInput.id ? "#" + otpInput.id : (otpInput.name ? 'input[name="' + otpInput.name + '"]' : "input");
+  }
+  const body = (document.body.innerText || "").toLowerCase();
+  if (/verification code|one[- ]time|code sent|enter (the )?code/.test(body)) {
+    // OTP asked for but we could not pin an input - ask human to look
+    return "TEXT_PROMPT";
+  }
+  return null;
+}
+"""
+
 async def detect_form(page):
     """Detect form fields in the open page. Returns {fields:{...}, submit:str}."""
     return await page.evaluate(DETECT_FORM_JS)
@@ -252,15 +276,44 @@ async def learn_form(url):
             return shot, mapping, "No form fields found on this page."
         return shot, mapping, None
 
-async def signup_on_website(full_name, phone, email, password, max_attempts=3):
+async def request_otp(bot, chat_id, screenshot_path=None, url=""):
+    """Ask the owner for an OTP code and wait for their reply (3 min timeout)."""
+    fut = asyncio.get_running_loop().create_future()
+    OTP_WAIT[chat_id] = fut
+    try:
+        caption = (
+            f"🔐 *OTP required (v{BOT_VERSION})*\n\n"
+            f"Site: `{url}`\n\n"
+            "Send me the verification code from your email/phone.\n"
+            "You have 3 minutes."
+        )
+        if screenshot_path and os.path.exists(screenshot_path):
+            with open(screenshot_path, "rb") as photo:
+                await bot.send_photo(chat_id, photo, caption=caption, parse_mode="Markdown")
+        else:
+            await bot.send_message(chat_id, caption, parse_mode="Markdown")
+        code = await asyncio.wait_for(fut, timeout=180)
+        return code
+    except asyncio.TimeoutError:
+        try:
+            await bot.send_message(chat_id, "⏱ OTP wait timed out.")
+        except Exception:
+            pass
+        return None
+    finally:
+        OTP_WAIT.pop(chat_id, None)
+
+async def signup_on_website(full_name, phone, email, password, max_attempts=3,
+                            otp_chat_id=None, bot=None):
     last_error = "Unknown error"
     # Use learned mapping for this URL, or auto-detect live
     learned = load_learned().get(WEBSITE_URL)
     for attempt in range(max_attempts):
-        # Fresh data each attempt
+        # Fresh data each attempt (keep same email if override set - OTP must reach it)
         if attempt > 0:
             phone = generate_phone()
-            _, email = generate_unique_name()
+            if not OVERRIDE_EMAIL:
+                _, email = generate_unique_name()
         browser = None
         try:
             async with async_playwright() as p:
@@ -319,6 +372,54 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3):
                 
                 await page.click(submit_sel)
                 await page.wait_for_timeout(5000)
+                
+                # Check if the site demands an OTP/verification code
+                otp_sel = None
+                try:
+                    otp_sel = await page.evaluate(OTP_DETECT_JS)
+                except Exception:
+                    pass
+                
+                if otp_sel and bot and otp_chat_id:
+                    # Screenshot the OTP page and ask the owner for the code
+                    otp_shot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_shot.png")
+                    try:
+                        await page.screenshot(path=otp_shot)
+                    except Exception:
+                        otp_shot = None
+                    code = await request_otp(bot, otp_chat_id, otp_shot, page.url)
+                    if not code:
+                        await browser.close()
+                        browser = None
+                        return False, "OTP not provided (cancelled or timed out)", email, phone
+                    try:
+                        if otp_sel == "TEXT_PROMPT":
+                            # Could not pin the input - try common OTP selectors
+                            for sel in ['input[autocomplete="one-time-code"]', 'input[name*="otp" i]',
+                                        'input[placeholder*="code" i]', 'input[type="tel"]', 'input[type="text"]']:
+                                try:
+                                    await page.fill(sel, code)
+                                    otp_sel = sel
+                                    break
+                                except Exception:
+                                    continue
+                        else:
+                            await page.fill(otp_sel, code)
+                        # Submit the OTP (same button, or Enter)
+                        try:
+                            await page.click(submit_sel)
+                        except Exception:
+                            await page.keyboard.press("Enter")
+                        await page.wait_for_timeout(5000)
+                    except Exception as e:
+                        await browser.close()
+                        browser = None
+                        return False, f"OTP fill failed: {str(e)}", email, phone
+                elif otp_sel:
+                    # OTP needed but no interactive session (batch mode)
+                    await browser.close()
+                    browser = None
+                    return False, "Site requires OTP — use /newuser (interactive) or /setemail", email, phone
                 
                 page_content = await page.content()
                 current_url = page.url
@@ -588,10 +689,17 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     full_name = generate_full_name()
     phone = generate_phone()
-    username, email = generate_unique_name()
+    if OVERRIDE_EMAIL:
+        username = OVERRIDE_EMAIL.split("@")[0]
+        email = OVERRIDE_EMAIL
+    else:
+        username, email = generate_unique_name()
     password = generate_password()
     
-    success, message, final_email, final_phone = await signup_on_website(full_name, phone, email, password)
+    success, message, final_email, final_phone = await signup_on_website(
+        full_name, phone, email, password,
+        otp_chat_id=update.message.chat_id, bot=context.bot
+    )
     
     if success:
         users[final_email] = {
@@ -683,6 +791,61 @@ async def set_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✅ URL updated: {WEBSITE_URL}")
 
+async def set_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set a fixed email (for OTP sites) or 'off' to go back to random emails."""
+    global OVERRIDE_EMAIL
+    if update.message.from_user.id != OWNER_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            f"Current email mode: {OVERRIDE_EMAIL if OVERRIDE_EMAIL else 'random (auto-generated)'}\n\n"
+            "Usage:\n"
+            "/setemail you@gmail.com  — use this email for signups (OTP goes here)\n"
+            "/setemail off  — back to random emails"
+        )
+        return
+    
+    arg = context.args[0]
+    if arg.lower() in ("off", "none", "random"):
+        OVERRIDE_EMAIL = ""
+    elif "@" in arg and "." in arg.split("@")[-1]:
+        OVERRIDE_EMAIL = arg
+    else:
+        await update.message.reply_text("❌ Give a valid email or 'off'")
+        return
+    
+    config["override_email"] = OVERRIDE_EMAIL
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+    
+    if OVERRIDE_EMAIL:
+        await update.message.reply_text(
+            f"✅ Fixed email set: `{OVERRIDE_EMAIL}`\n\n"
+            "OTP codes for signups will be sent to this inbox.\n"
+            "Note: the same email can usually only register once — "
+            "for multiple OTP accounts, change it with /setemail before each /newuser.",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("✅ Back to random auto-generated emails.")
+
+async def otp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catch the OTP code the owner sends while a signup is waiting."""
+    if update.message.from_user.id != OWNER_ID:
+        return
+    fut = OTP_WAIT.get(update.message.chat_id)
+    if fut is None or fut.done():
+        return
+    code = update.message.text.strip()
+    # Extract a likely code (4-8 digits or alnum) from casual messages
+    m = re.search(r'\b([A-Za-z0-9]{4,8})\b', code)
+    fut.set_result(m.group(1) if m else code)
+    try:
+        await update.message.reply_text(f"📩 Code received: `{m.group(1) if m else code}` — submitting...", parse_mode="Markdown")
+    except Exception:
+        pass
+
 async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
         return
@@ -694,6 +857,7 @@ async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚙️ *Settings (v{BOT_VERSION})*\n\n"
         f"Website: {WEBSITE_URL}\n"
         f"Form: {learned_line}\n"
+        f"Email: {OVERRIDE_EMAIL if OVERRIDE_EMAIL else 'random (auto)'}\n"
         f"Referral: {REFERRAL_CODE}\n"
         f"Name pool: {len(NAME_POOL)} names\n"
         f"Accounts created: {len(users)}",
@@ -778,8 +942,9 @@ async def post_init(app):
     new_commands = [
         BotCommand("start", "Show bot info"),
         BotCommand("learn", "Teach bot a signup page (auto-detect form)"),
-        BotCommand("newuser", "Auto create new account"),
+        BotCommand("newuser", "Auto create new account (interactive OTP)"),
         BotCommand("list", "View all created accounts"),
+        BotCommand("setemail", "Fixed email for OTP sites"),
         BotCommand("test", "Test connection to website"),
         BotCommand("seturl", "Change website URL"),
         BotCommand("config", "View current settings"),
@@ -835,7 +1000,10 @@ def main():
     app.add_handler(CommandHandler("list", list_users))
     app.add_handler(CommandHandler("test", test_connection))
     app.add_handler(CommandHandler("seturl", set_url))
+    app.add_handler(CommandHandler("setemail", set_email))
     app.add_handler(CommandHandler("config", show_config))
+    # Catches OTP codes the owner sends while a signup waits (after commands)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, otp_message))
 
     threading.Thread(target=run_health_server, daemon=True).start()
 
