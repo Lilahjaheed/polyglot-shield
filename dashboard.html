@@ -19,7 +19,10 @@ body {
   background: var(--bg); color: var(--text); min-height: 100vh; padding: 16px;
   max-width: 480px; margin: 0 auto;
 }
-h1 { font-size: 20px; margin-bottom: 4px; }
+h1 { font-size: 20px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.conn { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.conn.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.conn.off { background: var(--red); }
 .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
 .card {
   background: var(--card); border: 1px solid var(--border);
@@ -45,19 +48,20 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .progress-wrap { background: #0b1220; border-radius: 8px; height: 14px; overflow: hidden; margin: 10px 0; }
 .progress-bar { background: linear-gradient(90deg, var(--blue), var(--green)); height: 100%; width: 0%; transition: width .4s; }
 .log { font-size: 12px; max-height: 160px; overflow-y: auto; font-family: monospace; }
-.log div { padding: 2px 0; border-bottom: 1px solid #222; }
+.log div { padding: 2px 0; border-bottom: 1px solid #222; word-break: break-all; }
 .ok { color: var(--green); } .err { color: var(--red); }
 label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
 input[type=text], select {
   width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
   background: #0b1220; color: var(--text); font-size: 14px;
 }
+input[type=text]:focus, select:focus { outline: none; border-color: var(--blue); }
 .switch { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
 .switch label { margin: 0; font-size: 14px; color: var(--text); }
 .toggle { position: relative; width: 52px; height: 28px; }
 .toggle input { opacity: 0; width: 0; height: 0; }
 .slider {
-  position: absolute; inset: 0; background: var(--red); border-radius: 28px;
+  position: absolute; inset: 0; background: #64748b; border-radius: 28px;
   cursor: pointer; transition: .3s;
 }
 .slider:before {
@@ -70,20 +74,24 @@ input[type=text], select {
 .badge-on { background: rgba(34,197,94,.2); color: var(--green); }
 .badge-off { background: rgba(239,68,68,.2); color: var(--red); }
 .accounts { max-height: 220px; overflow-y: auto; font-size: 12px; }
-.accounts .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.accounts .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); gap: 8px; }
+.accounts .row span:last-child { color: var(--muted); word-break: break-all; text-align: right; }
 .muted { color: var(--muted); }
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--card); border: 1px solid var(--border); padding: 10px 18px;
   border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none;
+  z-index: 99; max-width: 90%; text-align: center;
 }
 .toast.show { opacity: 1; }
-.hidden { display: none; }
+.save-row { display: flex; gap: 8px; margin-top: 10px; }
+.save-row button { flex: 1; }
+.hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
 </style>
 </head>
 <body>
-<h1>🤖 Signup Bot</h1>
-<div class="sub">v<span id="ver">…</span> · <span id="engine">…</span> · <span id="url" class="muted">…</span></div>
+<h1>🤖 Signup Bot <span class="conn" id="connDot"></span></h1>
+<div class="sub">v<span id="ver">…</span> · <span id="engine">…</span></div>
 
 <div class="card">
   <div class="stats">
@@ -106,17 +114,22 @@ input[type=text], select {
     <button class="btn-green" onclick="start(20)">+20</button>
     <button class="btn-green" onclick="start(50)">+50</button>
   </div>
-  <button class="btn-red" id="stopBtn" style="margin-top:8px" onclick="stopJob()">🛑 Stop</button>
+  <button class="btn-red" id="stopBtn" style="margin-top:8px" disabled onclick="stopJob()">🛑 Stop</button>
 </div>
 
 <div class="card">
   <b>⚙️ Settings</b>
   <div class="switch">
-    <label>Auto-OTP <span id="otpBadge" class="badge badge-off">OFF</span></label>
-    <div class="toggle"><input type="checkbox" id="otpToggle" onchange="saveOtp()"><span class="slider"></span></div>
+    <label>Auto-OTP <span id="otpBadge" class="badge badge-off">…</span></label>
+    <div class="toggle">
+      <input type="checkbox" id="otpToggle">
+      <span class="slider" onclick="toggleOtp()"></span>
+    </div>
   </div>
+  <div class="hint">ON = temp email + auto code reading. OFF = your email, you send codes.</div>
+
   <label>Region</label>
-  <select id="regionSel" onchange="saveRegion()">
+  <select id="regionSel">
     <option value="nigeria">🇳🇬 Nigeria</option>
     <option value="usa">🇺🇸 USA</option>
     <option value="uk">🇬🇧 UK</option>
@@ -128,9 +141,15 @@ input[type=text], select {
     <option value="uae">🇦🇪 UAE</option>
     <option value="germany">🇩🇪 Germany</option>
   </select>
+  <div class="save-row">
+    <button class="btn-blue" onclick="saveRegion()">💾 Save Region</button>
+  </div>
+
   <label>Website URL</label>
-  <input type="text" id="siteUrl" placeholder="https://...">
-  <button class="btn-blue" style="margin-top:10px" onclick="saveUrl()">💾 Save URL</button>
+  <input type="text" id="siteUrl" placeholder="https://..." spellcheck="false">
+  <div class="save-row">
+    <button class="btn-blue" onclick="saveUrl()">💾 Save URL</button>
+  </div>
 </div>
 
 <div class="card">
@@ -142,96 +161,200 @@ input[type=text], select {
 
 <script>
 const T = new URLSearchParams(location.search).get('t') || '';
-const api = (path, opts={}) => fetch('/api/'+path+(path.includes('?')?'&':'?')+'t='+encodeURIComponent(T), opts);
+let serverState = { auto_otp: false, region: 'nigeria', url: '' };
+// Local-edit lock: while user is typing/toggling, server polls must NOT overwrite
+let lockUntil = 0;
+let saving = false;
 
-function toast(msg) {
+function lock() { lockUntil = Date.now() + 15000; }
+function locked() { return Date.now() < lockUntil || saving; }
+
+function toast(msg, ms) {
   const el = document.getElementById('toast');
   el.textContent = msg; el.classList.add('show');
-  setTimeout(()=>el.classList.remove('show'), 2200);
+  clearTimeout(el._t);
+  el._t = setTimeout(()=>el.classList.remove('show'), ms || 2500);
 }
 
-async function loadStatus() {
+async function api(path, opts={}) {
+  const sep = path.includes('?') ? '&' : '?';
+  const r = await fetch('/api/'+path+sep+'t='+encodeURIComponent(T), opts);
+  if (r.status === 401) {
+    setConn(false);
+    throw new Error('Unauthorized — open the app from the bot button');
+  }
+  setConn(true);
+  return r;
+}
+
+function setConn(on) {
+  const d = document.getElementById('connDot');
+  d.className = 'conn ' + (on ? 'on' : 'off');
+}
+
+// ---------- OTP toggle (manual, not overwritten by polls) ----------
+async function toggleOtp() {
+  const el = document.getElementById('otpToggle');
+  el.checked = !el.checked; // slider click fires even when we change via JS; flip it
+  const v = el.checked;
+  lock(); saving = true;
   try {
-    const r = await api('status'); if (!r.ok) return;
+    const r = await api('settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({auto_otp: v})
+    });
+    const d = await r.json();
+    serverState.auto_otp = d.auto_otp;
+    updateOtpUi(d.auto_otp);
+    toast(v ? '🟢 Auto-OTP ON' : '🔴 Auto-OTP OFF');
+  } catch(e) {
+    el.checked = !v; // revert
+    toast('❌ ' + e.message, 4000);
+  } finally {
+    saving = false;
+  }
+}
+
+function updateOtpUi(v) {
+  document.getElementById('otpToggle').checked = !!v;
+  const b = document.getElementById('otpBadge');
+  b.textContent = v ? 'ON' : 'OFF';
+  b.className = 'badge ' + (v ? 'badge-on' : 'badge-off');
+}
+
+// ---------- URL (only server-fills when field is NOT focused/edited) ----------
+const urlInput = document.getElementById('siteUrl');
+urlInput.addEventListener('focus', lock);
+urlInput.addEventListener('input', lock);
+
+async function saveUrl() {
+  const v = urlInput.value.trim();
+  if (!v) return toast('Enter a URL first');
+  if (!/^https?:\/\//i.test(v)) return toast('URL must start with http:// or https://');
+  saving = true;
+  try {
+    const r = await api('settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url: v})
+    });
+    const d = await r.json();
+    serverState.url = d.url;
+    toast('💾 URL saved: ' + d.url, 3500);
+  } catch(e) {
+    toast('❌ Save failed: ' + e.message, 4500);
+  } finally {
+    saving = false;
+    lockUntil = Date.now() + 3000; // brief extra lock so poll doesn't flicker
+  }
+}
+
+// ---------- Region (explicit save button, no silent overwrite while focused) ----------
+const regionSel = document.getElementById('regionSel');
+regionSel.addEventListener('focus', lock);
+
+async function saveRegion() {
+  const v = regionSel.value;
+  saving = true;
+  try {
+    const r = await api('settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({region: v})
+    });
+    const d = await r.json();
+    serverState.region = d.region;
+    toast('🌍 Region saved');
+  } catch(e) {
+    toast('❌ ' + e.message, 4000);
+  } finally {
+    saving = false;
+  }
+}
+
+// ---------- Jobs ----------
+async function start(n) {
+  try {
+    const r = await api('start', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({count:n})
+    });
+    const d = await r.json();
+    toast(d.message || 'Started');
+    pollStatus(); pollAccounts();
+  } catch(e) {
+    toast('❌ ' + e.message, 4000);
+  }
+}
+async function stopJob() {
+  try {
+    await api('stop', {method:'POST'});
+    toast('🛑 Stop requested');
+  } catch(e) { toast('❌ ' + e.message, 4000); }
+}
+
+function esc(s){ return String(s).replace(/[<>&"]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+
+let lastJobActive = false;
+
+async function pollStatus() {
+  if (document.hidden) return; // save data when tab is in background
+  try {
+    const r = await api('status');
     const d = await r.json();
     document.getElementById('ver').textContent = d.version;
     document.getElementById('engine').textContent = d.engine;
-    document.getElementById('url').textContent = d.url;
     document.getElementById('totalAcc').textContent = d.total_accounts;
     document.getElementById('doneN').textContent = d.job?.done ?? 0;
     document.getElementById('okN').textContent = d.job?.created?.length ?? 0;
     document.getElementById('failN').textContent = d.job?.failed ?? 0;
     const total = d.job?.total || 0, done = d.job?.done || 0;
     document.getElementById('pbar').style.width = total ? (done/total*100)+'%' : '0%';
-    const log = document.getElementById('log');
-    if (d.job?.active) {
-      log.innerHTML = '';
-      (d.job.created||[]).slice(-5).forEach(e => log.innerHTML += '<div class="ok">✅ '+esc(e)+'</div>');
-      (d.job.errors||[]).slice(-5).forEach(e => log.innerHTML += '<div class="err">❌ '+esc(e)+'</div>');
-      if (!log.innerHTML) log.innerHTML = '<div class="muted">Working…</div>';
+    const active = !!d.job?.active;
+    document.querySelectorAll('.grid3 .btn-green, .grid .btn-green').forEach(b => b.disabled = active);
+    document.getElementById('stopBtn').disabled = !active;
+    if (active || lastJobActive) {
+      const log = document.getElementById('log');
+      let html = '';
+      (d.job.created||[]).slice(-6).forEach(e => html += '<div class="ok">✅ '+esc(e)+'</div>');
+      (d.job.errors||[]).slice(-6).forEach(e => html += '<div class="err">❌ '+esc(e)+'</div>');
+      if (!html) html = '<div class="muted">Working…</div>';
+      log.innerHTML = html;
+      log.scrollTop = log.scrollHeight;
+      if (active && !lastJobActive) pollAccounts(); // refresh list when job just finished
     }
-    document.getElementById('otpToggle').checked = !!d.auto_otp;
-    const badge = document.getElementById('otpBadge');
-    badge.textContent = d.auto_otp ? 'ON' : 'OFF';
-    badge.className = 'badge '+(d.auto_otp?'badge-on':'badge-off');
-    if (!document.getElementById('regionSel').dataset.touched)
-      document.getElementById('regionSel').value = d.region;
-    if (!document.getElementById('siteUrl').dataset.touched)
-      document.getElementById('siteUrl').value = d.url;
-    document.querySelectorAll('.btn-green').forEach(b => b.disabled = !!d.job?.active);
-    document.getElementById('stopBtn').disabled = !d.job?.active;
-  } catch(e) {}
+    lastJobActive = active;
+    // Only push server settings into the form when user is NOT editing
+    if (!locked()) {
+      serverState = {auto_otp: d.auto_otp, region: d.region, url: d.url};
+      updateOtpUi(d.auto_otp);
+      regionSel.value = d.region;
+      if (document.activeElement !== urlInput) urlInput.value = d.url;
+    }
+  } catch(e) {
+    setConn(false);
+  }
 }
 
-async function loadAccounts() {
+async function pollAccounts() {
+  if (document.hidden) return;
   try {
-    const r = await api('accounts'); if (!r.ok) return;
+    const r = await api('accounts');
     const d = await r.json();
     const el = document.getElementById('accounts');
     const keys = Object.keys(d.accounts||{});
     if (!keys.length) { el.innerHTML = '<div class="muted">No accounts yet.</div>'; return; }
     el.innerHTML = keys.slice().reverse().map(k => {
       const a = d.accounts[k];
-      return '<div class="row"><span>'+esc(a.full_name||'')+'</span><span class="muted">'+esc(k)+'</span></div>';
+      return '<div class="row"><span>'+esc(a.full_name||'')+'</span><span>'+esc(k)+'</span></div>';
     }).join('');
   } catch(e) {}
 }
 
-function esc(s){ return String(s).replace(/[<>&"]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+// Faster polls while a job is running, slow when idle
+setInterval(pollStatus, 2500);
+setInterval(pollAccounts, 10000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollStatus(); pollAccounts(); } });
 
-async function start(n) {
-  const r = await api('start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({count:n})});
-  const d = await r.json();
-  toast(d.message || 'Started');
-  setTimeout(loadStatus, 500);
-}
-async function stopJob() {
-  await api('stop', {method:'POST'});
-  toast('Stopping…');
-}
-async function saveOtp() {
-  const v = document.getElementById('otpToggle').checked;
-  await api('settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({auto_otp:v})});
-  toast(v ? '🟢 Auto-OTP ON' : '🔴 Auto-OTP OFF');
-  loadStatus();
-}
-async function saveRegion() {
-  const v = document.getElementById('regionSel').value;
-  document.getElementById('regionSel').dataset.touched = '1';
-  await api('settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({region:v})});
-  toast('🌍 Region saved');
-}
-async function saveUrl() {
-  const v = document.getElementById('siteUrl').value.trim();
-  if (!v) return toast('Enter a URL');
-  document.getElementById('siteUrl').dataset.touched = '1';
-  await api('settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url:v})});
-  toast('💾 URL saved');
-}
-
-loadStatus(); loadAccounts();
-setInterval(loadStatus, 2000);
-setInterval(loadAccounts, 8000);
+pollStatus(); pollAccounts();
 </script>
 </body>
 </html>

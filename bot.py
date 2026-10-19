@@ -1,4 +1,4 @@
-BOT_VERSION = "5.9"
+BOT_VERSION = "5.10"
 
 import os
 import re
