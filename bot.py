@@ -1,4 +1,4 @@
-BOT_VERSION = "5.14"
+BOT_VERSION = "5.15"
 
 import os
 import re
@@ -768,6 +768,43 @@ async def reveal_form(page):
     except Exception:
         pass
 
+async def open_register_tab(page):
+    """SPA register modals (winzaro etc.) open on a tabbed popup.
+    If no form fields visible, click a Register button to open the modal,
+    then click the simplest tab (account / username) if present."""
+    # Step 1: if fields already visible, done
+    try:
+        if await page.locator("input").count() >= 2:
+            return
+    except Exception:
+        pass
+    # Step 2: click Register / Sign Up to open the modal
+    open_texts = r"register|sign up|create account|join"
+    for sel in (
+        page.get_by_role("button", name=re.compile(open_texts, re.I)),
+        page.locator("a, button, [role=button], div, span").filter(
+            has_text=re.compile(rf"^({open_texts})$", re.I)
+        ),
+    ):
+        try:
+            if await _try_click(page, sel.first, timeout=2000):
+                await page.wait_for_timeout(2500)
+                if await page.locator("input").count() >= 2:
+                    return
+        except Exception:
+            pass
+    # Step 3: pick the simplest tab — prefer "account"/"username" tab over
+    # phone (OTP) tab. Try clicking tabs that appear inside the modal.
+    tab_texts = r"account|username|user name|email|register"
+    try:
+        el = page.locator("[role=tab], .tab, li, span, div, button").filter(
+            has_text=re.compile(tab_texts, re.I)
+        ).first
+        await _try_click(page, el, timeout=1500)
+        await page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
 async def click_submit(page, submit_sel=None):
     """Robust submit/Next button click — waterfall of strategies from top
     automation repos (sentri, buttonmash, playwright best-practices).
@@ -893,12 +930,28 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                     await browser.close()
                     browser = None
                     return False, "Cancelled by user", email, phone
+                # SPA sites (Vite/Vue/React) render the form via JS after boot —
+                # give the bundle time to mount, then open any hidden modal/tab.
+                # Only when NO form is visible yet (normal sites unaffected).
+                await page.wait_for_timeout(3000)
+                try:
+                    _n_inputs = await page.locator("input").count()
+                except Exception:
+                    _n_inputs = 0
+                if _n_inputs < 2:
+                    await reveal_form(page)
+                    await open_register_tab(page)
                 # Wait through loading animations/spinners until form appears
-                wait_mapping = await wait_for_form_ready(page, timeout_ms=25000)
+                wait_mapping = await wait_for_form_ready(page, timeout_ms=30000)
                 if stop_event and stop_event.is_set():
                     await browser.close()
                     browser = None
                     return False, "Cancelled by user", email, phone
+                # Form still missing? One more modal-open retry (slow SPAs)
+                if not wait_mapping or len(wait_mapping.get("fields", {})) < 2:
+                    await page.wait_for_timeout(3000)
+                    await open_register_tab(page)
+                    wait_mapping = await wait_for_form_ready(page, timeout_ms=15000)
                 
                 values = {
                     "full_name": full_name, "phone": phone,
@@ -966,6 +1019,27 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                                     pass  # optional/unknown field
                     
                     await page.wait_for_timeout(500)
+                    
+                    # Tick required agreement checkboxes (18+, terms) — SPAs
+                    # block submit otherwise. Only tick UNCHECKED ones.
+                    try:
+                        boxes = page.locator("input[type=checkbox]")
+                        nb = min(await boxes.count(), 6)
+                        for bi in range(nb):
+                            try:
+                                if not await boxes.nth(bi).is_checked():
+                                    await boxes.nth(bi).check(timeout=800)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    
+                    # Snapshot body text BEFORE submit (to diff error text after)
+                    body_before = ""
+                    try:
+                        body_before = (await page.inner_text("body")).lower()
+                    except Exception:
+                        pass
                     
                     # Click Next / Continue / Submit — robust waterfall
                     clicked = await click_submit(page, submit_sel)
@@ -1060,6 +1134,49 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                             or any(k in body_l for k in ("welcome", "congratulations", "account created", "verify your email"))):
                         return True, "Account created!", email, phone
                     
+                    # AJAX success check (SPA sites submit without URL change):
+                    # wait briefly for the async response, then look for signals
+                    await page.wait_for_timeout(2500)
+                    try:
+                        input_count = await page.locator("input").count()
+                    except Exception:
+                        input_count = -1
+                    # Modal/toast success signals
+                    body_l2 = ""
+                    try:
+                        body_l2 = (await page.inner_text("body")).lower()
+                    except Exception:
+                        pass
+                    ajax_success = any(k in body_l2 for k in (
+                        "registration successful", "register successful",
+                        "account created", "successfully registered",
+                        "welcome", "congratulations", "sign up successful",
+                        "registration complete", "verify your email",
+                        "check your email", "successfully logged in"
+                    ))
+                    # Logged-in signal: logout button visible, or token stored
+                    has_logout = False
+                    try:
+                        has_logout = await page.locator(
+                            "text=/^(logout|log out|sign out|exit)$/i"
+                        ).first.is_visible(timeout=800)
+                    except Exception:
+                        pass
+                    has_token = False
+                    try:
+                        has_token = await page.evaluate(
+                            "() => !!(localStorage.getItem('token') || "
+                            "sessionStorage.getItem('token') || "
+                            "localStorage.getItem('access_token') || "
+                            "document.cookie.includes('token'))"
+                        )
+                    except Exception:
+                        pass
+                    # Form modal disappeared after submit (was 3+ inputs, now gone)
+                    modal_closed = input_count >= 0 and input_count < 2
+                    if ajax_success or has_logout or (has_token and modal_closed):
+                        return True, "Account created!", email, phone
+                    
                     # Error box on this step?
                     err_match = re.search(r'class="error"[^>]*>(.*?)</div>', page_content, re.S)
                     if err_match:
@@ -1073,6 +1190,45 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                             "vpn", "proxy", "datacenter", "bot", "automated"
                         )):
                             return False, f"BLOCKED: {err_text}", email, phone
+                        attempt_failed = True
+                        break
+                    
+                    # SPA toast/inline errors (no class="error" div).
+                    # Only consider text that APPEARED after submit (diff vs
+                    # before-snapshot) — avoids false positives from static
+                    # page copy like "Must be 18" / "Please enter our site".
+                    err_phrases = (
+                        "already exists", "already registered", "already in use",
+                        "invalid ", "incorrect", "does not match", "too weak",
+                        "is required", "required field", "failed",
+                        "not available", "unable to"
+                    )
+                    new_body = body_l2
+                    if body_before and body_before in body_l2:
+                        new_body = body_l2.replace(body_before, "", 1)
+                    elif body_before:
+                        # SPA re-render: line-level diff instead (only NEW lines)
+                        _before_lines = set(body_before.splitlines())
+                        new_body = "\n".join(
+                            ln for ln in body_l2.splitlines()
+                            if ln not in _before_lines
+                        )
+                    found_err = None
+                    for phrase in err_phrases:
+                        idx = new_body.find(phrase)
+                        if idx >= 0:
+                            start = max(0, idx - 60)
+                            found_err = new_body[start:idx + 80].strip()
+                            break
+                    if found_err:
+                        last_error = found_err
+                        low = found_err.lower()
+                        if any(k in low for k in (
+                            "too many", "rate limit", "try again later", "temporarily blocked",
+                            "suspended", "abuse", "flood", "multiple accounts",
+                            "vpn", "proxy", "datacenter", "bot", "automated"
+                        )):
+                            return False, f"BLOCKED: {found_err}", email, phone
                         attempt_failed = True
                         break
                     
