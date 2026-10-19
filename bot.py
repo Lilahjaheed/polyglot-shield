@@ -49,13 +49,9 @@ ACTIVE_REGION = config.get("region", "nigeria")
 # False = your own email (OVERRIDE_EMAIL), you send me the code.
 AUTO_OTP = config.get("auto_otp", False)
 
-# Web dashboard token (generated once, stored in config). Only you have the link.
-WEB_TOKEN = config.get("web_token", "")
-if not WEB_TOKEN:
-    WEB_TOKEN = "".join(random.choices(string.ascii_letters + string.digits, k=32))
-    config["web_token"] = WEB_TOKEN
-    with open(CONFIG_PATH, "w") as _f:
-        json.dump(config, _f, indent=2)
+# Web dashboard token — derived from bot token so it never sits in git.
+# Only someone with the bot token can compute it.
+WEB_TOKEN = hashlib.sha256(("polyglot_web:" + BOT_TOKEN).encode()).hexdigest()[:32]
 
 # Filled in main() — lets the HTTP thread schedule work on the bot's event loop
 BOT_LOOP = None
