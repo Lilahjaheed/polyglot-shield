@@ -1,4 +1,4 @@
-BOT_VERSION = "5.4"
+BOT_VERSION = "5.5"
 
 import os
 import re
@@ -29,6 +29,37 @@ REFERRAL_CODE = config.get("referral_code", "0fc8fbfb")
 NAME_POOL = config.get("name_pool", ["John Doe"])
 # Fixed email for OTP sites (codes must reach an inbox you control)
 OVERRIDE_EMAIL = config.get("override_email", "")
+# Region the browser pretends to be in (for geo-blocked sites)
+ACTIVE_REGION = config.get("region", "nigeria")
+
+REGIONS = {
+    "nigeria":  {"label": "🇳🇬 Nigeria",     "tz": "Africa/Lagos",        "locale": "en-NG", "ua_loc": "NG", "geo": (6.5244, 3.3792)},
+    "usa":      {"label": "🇺🇸 USA",         "tz": "America/New_York",    "locale": "en-US", "ua_loc": "US", "geo": (40.7128, -74.0060)},
+    "uk":       {"label": "🇬🇧 UK",          "tz": "Europe/London",       "locale": "en-GB", "ua_loc": "GB", "geo": (51.5074, -0.1278)},
+    "ghana":    {"label": "🇬🇭 Ghana",       "tz": "Africa/Accra",        "locale": "en-GH", "ua_loc": "GH", "geo": (5.6037, -0.1870)},
+    "kenya":    {"label": "🇰🇪 Kenya",       "tz": "Africa/Nairobi",      "locale": "en-KE", "ua_loc": "KE", "geo": (-1.2921, 36.8219)},
+    "south_africa": {"label": "🇿🇦 South Africa", "tz": "Africa/Johannesburg", "locale": "en-ZA", "ua_loc": "ZA", "geo": (-26.2041, 28.0473)},
+    "canada":   {"label": "🇨🇦 Canada",      "tz": "America/Toronto",     "locale": "en-CA", "ua_loc": "CA", "geo": (43.6532, -79.3832)},
+    "india":    {"label": "🇮🇳 India",       "tz": "Asia/Kolkata",        "locale": "en-IN", "ua_loc": "IN", "geo": (28.6139, 77.2090)},
+    "uae":      {"label": "🇦🇪 UAE",         "tz": "Asia/Dubai",          "locale": "en-AE", "ua_loc": "AE", "geo": (25.2048, 55.2708)},
+    "germany":  {"label": "🇩🇪 Germany",     "tz": "Europe/Berlin",       "locale": "de-DE", "ua_loc": "DE", "geo": (52.5200, 13.4050)},
+}
+
+def region_options():
+    """Playwright context options for the active region (stealth-ish)."""
+    r = REGIONS.get(ACTIVE_REGION, REGIONS["nigeria"])
+    return {
+        "timezone_id": r["tz"],
+        "locale": r["locale"],
+        "geolocation": {"latitude": r["geo"][0], "longitude": r["geo"][1]},
+        "permissions": ["geolocation"],
+        "user_agent": (
+            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "viewport": {"width": 1366, "height": 768},
+        "extra_http_headers": {"Accept-Language": f"{r['locale']},en;q=0.9"},
+    }
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -300,21 +331,57 @@ def mapping_report(mapping):
     lines.append(f"  🔘 Submit → `{mapping.get('submit', '?')}`")
     return "\n".join(lines)
 
+async def wait_for_form_ready(page, timeout_ms=30000):
+    """Wait through loading animations/spinners until the signup form appears."""
+    deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            mapping = await detect_form(page)
+            if mapping.get("fields") and len(mapping["fields"]) >= 2:
+                # Also ensure at least one field is actually visible (not behind overlay)
+                any_visible = False
+                for sel in mapping["fields"].values():
+                    try:
+                        if sel and await page.is_visible(sel, timeout=500):
+                            any_visible = True
+                            break
+                    except Exception:
+                        continue
+                if any_visible:
+                    return mapping
+        except Exception:
+            pass
+        # Nudge common loading spinners out of the way
+        try:
+            await page.evaluate("""
+                () => {
+                  document.querySelectorAll(
+                    '.loading, .spinner, .loader, [class*="loader"], [class*="spinner"], [id*="loading"]'
+                  ).forEach(el => el.style.display = 'none');
+                }
+            """)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+    # Timed out - return whatever we last saw (diagnostics use it)
+    try:
+        return await detect_form(page)
+    except Exception:
+        return {"fields": {}, "submit": ""}
+
 async def learn_form(url):
     """Visit url, screenshot the page, detect the signup form.
     Returns (screenshot_path_or_None, mapping, error_or_None)."""
     async with async_playwright() as p:
         browser = await launch_chromium(p)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1366, "height": 900}, locale="en-US"
-        )
+        context = await browser.new_context(**region_options())
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
         page = await context.new_page()
         await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
+        # Wait through loading animations for the real form
+        mapping = await wait_for_form_ready(page, timeout_ms=20000)
         
         shot = None
         try:
@@ -323,7 +390,6 @@ async def learn_form(url):
         except Exception:
             pass
         
-        mapping = await detect_form(page)
         await browser.close()
         
         if not mapping.get("fields"):
@@ -372,11 +438,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
         try:
             async with async_playwright() as p:
                 browser = await launch_chromium(p)
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    viewport={"width": 1366, "height": 768},
-                    locale="en-US"
-                )
+                context = await browser.new_context(**region_options())
                 # Hide automation flags from the site
                 await context.add_init_script(
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
@@ -385,7 +447,8 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                 
                 # domcontentloaded is reliable; networkidle hangs on analytics beacons
                 await page.goto(WEBSITE_URL, timeout=45000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(2000)
+                # Wait through loading animations/spinners until form appears
+                wait_mapping = await wait_for_form_ready(page, timeout_ms=25000)
                 
                 values = {
                     "full_name": full_name, "phone": phone,
@@ -398,7 +461,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                 
                 # Multi-step wizard: fill -> click next/submit -> repeat (max 6 steps)
                 for step in range(6):
-                    mapping = (learned if step == 0 else None) or await detect_form(page)
+                    mapping = (learned if step == 0 else None) or wait_mapping or await detect_form(page)
                     fields = mapping.get("fields", {})
                     submit_sel = mapping.get("submit", "#submitBtn")
                     
@@ -575,12 +638,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("🔍 Learn Form", callback_data="ask_learn"),
+            InlineKeyboardButton(f"🌍 Region: {REGIONS.get(ACTIVE_REGION, REGIONS['nigeria'])['label']}", callback_data="ask_region"),
         ],
     ]
     
     await update.message.reply_text(
         f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
         f"Website: readersbuck.com\n"
+        f"Accounts created: {len(users)}\n\n"
+        f"Select how many accounts to create:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def start_from_callback(query):
+    """Re-render the main menu from a callback query."""
+    PENDING_INPUT.pop(query.message.chat_id, None)
+    keyboard = [
+        [
+            InlineKeyboardButton("1 Account", callback_data="create_1"),
+            InlineKeyboardButton("5 Accounts", callback_data="create_5"),
+        ],
+        [
+            InlineKeyboardButton("10 Accounts", callback_data="create_10"),
+            InlineKeyboardButton("20 Accounts", callback_data="create_20"),
+        ],
+        [
+            InlineKeyboardButton("50 Accounts", callback_data="create_50"),
+            InlineKeyboardButton("100 Accounts", callback_data="create_100"),
+        ],
+        [
+            InlineKeyboardButton("📋 View Accounts", callback_data="view_accounts"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="show_settings"),
+        ],
+        [
+            InlineKeyboardButton("🔗 Set URL", callback_data="ask_url"),
+            InlineKeyboardButton("✉️ Set Email", callback_data="ask_email"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Learn Form", callback_data="ask_learn"),
+            InlineKeyboardButton(f"🌍 Region: {REGIONS.get(ACTIVE_REGION, REGIONS['nigeria'])['label']}", callback_data="ask_region"),
+        ],
+    ]
+    await query.edit_message_text(
+        f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
+        f"Website: {WEBSITE_URL}\n"
         f"Accounts created: {len(users)}\n\n"
         f"Select how many accounts to create:",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -720,6 +822,51 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.message.reply_text(re.sub(r'\\[*_`\[\]]', '', result))
                 except Exception:
                     pass
+    
+    elif data == "ask_region":
+        rows = []
+        row = []
+        for key, r in REGIONS.items():
+            row.append(InlineKeyboardButton(r["label"], callback_data=f"set_region:{key}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton("« Back", callback_data="back_to_menu")])
+        await query.edit_message_text(
+            "🌍 *Select your region*\n\n"
+            "The browser pretends to be from this country\n"
+            "(timezone, language, GPS location).\n"
+            "Use this if a site says \"not available in your country\".",
+            reply_markup=InlineKeyboardMarkup(rows),
+            parse_mode="Markdown"
+        )
+        return
+    
+    elif data.startswith("set_region:"):
+        global ACTIVE_REGION
+        key = data.split(":", 1)[1]
+        if key in REGIONS:
+            ACTIVE_REGION = key
+            config["region"] = key
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            await query.answer(f"Region set to {REGIONS[key]['label']}")
+            await query.edit_message_text(
+                f"✅ Region set to {REGIONS[key]['label']}\n\n"
+                f"Timezone: {REGIONS[key]['tz']}\n"
+                f"Language: {REGIONS[key]['locale']}\n\n"
+                f"Signups will now look like they come from this country.",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.answer("Unknown region")
+        return
+    
+    elif data == "back_to_menu":
+        await start_from_callback(query)
+        return
     
     elif data == "ask_learn":
         PENDING_INPUT[query.message.chat_id] = "learn_url"
@@ -896,12 +1043,19 @@ async def test_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with async_playwright() as p:
             browser = await launch_chromium(p)
-            page = await browser.new_page()
-            await page.goto(WEBSITE_URL, timeout=15000)
+            context = await browser.new_context(**region_options())
+            page = await context.new_page()
+            await page.goto(WEBSITE_URL, timeout=30000, wait_until="domcontentloaded")
             title = await page.title()
+            mapping = await wait_for_form_ready(page, timeout_ms=10000)
             await browser.close()
+            r = REGIONS.get(ACTIVE_REGION, REGIONS["nigeria"])
             await update.message.reply_text(
-                f"✅ Connected! (v{BOT_VERSION})\n\nWebsite: {WEBSITE_URL}\nTitle: {title}"
+                f"✅ Connected! (v{BOT_VERSION})\n\n"
+                f"Website: {WEBSITE_URL}\n"
+                f"Title: {title}\n"
+                f"Form fields found: {len(mapping.get('fields', {}))}\n"
+                f"Region: {r['label']}"
             )
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {str(e)}")
@@ -1059,12 +1213,14 @@ async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     learned = load_learned().get(WEBSITE_URL)
     learned_line = "✅ Learned" if learned else "❌ Not learned (using live detection)"
+    r = REGIONS.get(ACTIVE_REGION, REGIONS["nigeria"])
     
     await update.message.reply_text(
         f"⚙️ *Settings (v{BOT_VERSION})*\n\n"
         f"Website: {WEBSITE_URL}\n"
         f"Form: {learned_line}\n"
         f"Email: {OVERRIDE_EMAIL if OVERRIDE_EMAIL else 'random (auto)'}\n"
+        f"Region: {r['label']} ({r['tz']})\n"
         f"Referral: {REFERRAL_CODE}\n"
         f"Name pool: {len(NAME_POOL)} names\n"
         f"Accounts created: {len(users)}",
