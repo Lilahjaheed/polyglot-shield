@@ -150,6 +150,22 @@ input[type=text]:focus, select:focus { outline: none; border-color: var(--blue);
   <div class="save-row">
     <button class="btn-blue" onclick="saveUrl()">💾 Save URL</button>
   </div>
+
+  <div class="switch" style="margin-top:14px">
+    <label>Free Proxy <span id="fpBadge" class="badge badge-off">…</span></label>
+    <div class="toggle">
+      <input type="checkbox" id="fpToggle">
+      <span class="slider" onclick="toggleFp()"></span>
+    </div>
+  </div>
+  <div class="hint">ON = fresh free IP per signup (slower). OFF = direct.</div>
+
+  <label>Your Proxy (optional)</label>
+  <input type="text" id="proxyInput" placeholder="http://user:pass@host:port" spellcheck="false">
+  <div class="save-row">
+    <button class="btn-blue" onclick="saveProxy()">💾 Save Proxy</button>
+    <button class="btn-red" onclick="clearProxy()">🚫 Clear</button>
+  </div>
 </div>
 
 <div class="card">
@@ -270,6 +286,62 @@ async function saveRegion() {
   }
 }
 
+// ---------- Proxy ----------
+const proxyInput = document.getElementById('proxyInput');
+proxyInput.addEventListener('focus', lock);
+
+async function saveProxy() {
+  const v = proxyInput.value.trim();
+  if (!v) return toast('Enter a proxy or tap Clear');
+  saving = true;
+  try {
+    const r = await api('settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({proxy: v})
+    });
+    const d = await r.json();
+    toast(d.proxy ? '🔑 Proxy saved: ' + d.proxy : '❌ Invalid proxy format', 4000);
+  } catch(e) { toast('❌ ' + e.message, 4000); }
+  finally { saving = false; }
+}
+async function clearProxy() {
+  saving = true;
+  try {
+    const r = await api('settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({proxy: 'off'})
+    });
+    const d = await r.json();
+    proxyInput.value = '';
+    toast('🚫 Proxy cleared');
+  } catch(e) { toast('❌ ' + e.message, 4000); }
+  finally { saving = false; }
+}
+async function toggleFp() {
+  const el = document.getElementById('fpToggle');
+  el.checked = !el.checked;
+  const v = el.checked;
+  lock(); saving = true;
+  try {
+    const r = await api('settings', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({free_proxy: v})
+    });
+    const d = await r.json();
+    updateFpUi(d.free_proxy);
+    toast(v ? '🟢 Free Proxy ON' : '🔴 Free Proxy OFF');
+  } catch(e) {
+    el.checked = !v;
+    toast('❌ ' + e.message, 4000);
+  } finally { saving = false; }
+}
+function updateFpUi(v) {
+  document.getElementById('fpToggle').checked = !!v;
+  const b = document.getElementById('fpBadge');
+  b.textContent = v ? 'ON' : 'OFF';
+  b.className = 'badge ' + (v ? 'badge-on' : 'badge-off');
+}
+
 // ---------- Jobs ----------
 async function start(n) {
   try {
@@ -324,10 +396,12 @@ async function pollStatus() {
     lastJobActive = active;
     // Only push server settings into the form when user is NOT editing
     if (!locked()) {
-      serverState = {auto_otp: d.auto_otp, region: d.region, url: d.url};
+      serverState = {auto_otp: d.auto_otp, region: d.region, url: d.url, proxy: d.proxy, free_proxy: d.free_proxy};
       updateOtpUi(d.auto_otp);
+      updateFpUi(d.free_proxy);
       regionSel.value = d.region;
       if (document.activeElement !== urlInput) urlInput.value = d.url;
+      if (document.activeElement !== proxyInput) proxyInput.value = d.proxy || '';
     }
   } catch(e) {
     setConn(false);

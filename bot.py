@@ -1,4 +1,4 @@
-BOT_VERSION = "5.11"
+BOT_VERSION = "5.12"
 
 import os
 import re
@@ -48,6 +48,10 @@ ACTIVE_REGION = config.get("region", "nigeria")
 # Auto-OTP mode: True = temp email (mail.tm), reads OTP automatically.
 # False = your own email (OVERRIDE_EMAIL), you send me the code.
 AUTO_OTP = config.get("auto_otp", False)
+# Your own proxy (http://user:pass@host:port or socks5://host:port). Empty = off.
+PROXY_URL = config.get("proxy_url", "")
+# Free-proxy mode: auto-fetch a free IP matching the active region each signup.
+FREE_PROXY = config.get("free_proxy", False)
 
 # Web dashboard token — derived from bot token so it never sits in git.
 # Only someone with the bot token can compute it.
@@ -69,10 +73,11 @@ REGIONS = {
     "germany":  {"label": "🇩🇪 Germany",     "tz": "Europe/Berlin",       "locale": "de-DE", "ua_loc": "DE", "geo": (52.5200, 13.4050)},
 }
 
-def region_options():
-    """Playwright context options for the active region (stealth-ish)."""
+def region_options(proxy=None):
+    """Playwright context options for the active region (stealth-ish).
+    proxy: optional {'server':..., 'username':..., 'password':...} dict."""
     r = REGIONS.get(ACTIVE_REGION, REGIONS["nigeria"])
-    return {
+    opts = {
         "timezone_id": r["tz"],
         "locale": r["locale"],
         "geolocation": {"latitude": r["geo"][0], "longitude": r["geo"][1]},
@@ -84,6 +89,106 @@ def region_options():
         "viewport": {"width": 1366, "height": 768},
         "extra_http_headers": {"Accept-Language": f"{r['locale']},en;q=0.9"},
     }
+    if proxy:
+        opts["proxy"] = proxy
+    return opts
+
+def parse_proxy(url):
+    """Parse 'http://user:pass@host:port' or 'socks5://host:port' into Playwright proxy dict."""
+    if not url:
+        return None
+    url = url.strip()
+    if "://" not in url:
+        url = "http://" + url
+    try:
+        from urllib.parse import urlparse as _up
+        u = _up(url)
+        server = f"{u.scheme}://{u.hostname}:{u.port or 80}"
+        out = {"server": server}
+        if u.username:
+            out["username"] = u.username
+        if u.password:
+            out["password"] = u.password
+        return out
+    except Exception:
+        return None
+
+# Free proxy sources (public lists, best-effort)
+FREE_PROXY_SOURCES = [
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=NG,US,GB,GH,KE,ZA,CA,IN,AE,DE",
+]
+
+# ISO country codes per region (for country-filtered proxy lists)
+REGION_CC = {
+    "nigeria": "NG", "usa": "US", "uk": "GB", "ghana": "GH", "kenya": "KE",
+    "south_africa": "ZA", "canada": "CA", "india": "IN", "uae": "AE", "germany": "DE",
+}
+
+_free_proxy_cache = {"list": [], "ts": 0}
+
+async def fetch_free_proxy():
+    """Fetch a free HTTP proxy (best-effort). Returns Playwright proxy dict or None.
+    Tries country-filtered list first, then general list."""
+    loop = asyncio.get_event_loop()
+    now = loop.time()
+    # Refresh cache every 10 min
+    if now - _free_proxy_cache["ts"] > 600 or not _free_proxy_cache["list"]:
+        def _fetch():
+            found = []
+            cc = REGION_CC.get(ACTIVE_REGION, "")
+            # Country-specific source first
+            if cc:
+                try:
+                    r = requests.get(
+                        f"https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=3000&country={cc}",
+                        timeout=10
+                    )
+                    if r.status_code == 200:
+                        for line in r.text.splitlines():
+                            line = line.strip()
+                            if ":" in line:
+                                found.append(line)
+                except Exception:
+                    pass
+            # General lists
+            for src in FREE_PROXY_SOURCES[:2]:
+                try:
+                    r = requests.get(src, timeout=10)
+                    if r.status_code == 200:
+                        for line in r.text.splitlines()[:200]:
+                            line = line.strip()
+                            if ":" in line and line.count(".") == 3:
+                                found.append(line)
+                except Exception:
+                    continue
+            # De-dupe, keep first 50
+            seen = set()
+            out = []
+            for p in found:
+                if p not in seen:
+                    seen.add(p)
+                    out.append(p)
+                if len(out) >= 50:
+                    break
+            return out
+        _free_proxy_cache["list"] = await loop.run_in_executor(None, _fetch)
+        _free_proxy_cache["ts"] = now
+    
+    if not _free_proxy_cache["list"]:
+        return None
+    # Pick a random one
+    chosen = random.choice(_free_proxy_cache["list"])
+    return parse_proxy(chosen)
+
+async def get_context_proxy():
+    """Return the proxy dict to use for this signup, or None."""
+    if PROXY_URL:
+        return parse_proxy(PROXY_URL)
+    if FREE_PROXY:
+        return await fetch_free_proxy()
+    return None
 
 # ---------- mail.tm temp inbox (real email, auto OTP reading) ----------
 MAILTM_BASE = "https://api.mail.tm"
@@ -569,7 +674,8 @@ async def learn_form(url):
     Returns (screenshot_path_or_None, mapping, error_or_None)."""
     async with async_playwright() as p:
         browser = await launch_chromium(p)
-        context = await browser.new_context(**region_options())
+        ctx_proxy = await get_context_proxy()
+        context = await browser.new_context(**region_options(proxy=ctx_proxy))
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
@@ -740,7 +846,8 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
         try:
             async with async_playwright() as p:
                 browser = await launch_chromium(p)
-                context = await browser.new_context(**region_options())
+                ctx_proxy = await get_context_proxy()
+                context = await browser.new_context(**region_options(proxy=ctx_proxy))
                 # Hide automation flags from the site
                 await context.add_init_script(
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
@@ -976,6 +1083,13 @@ def main_menu_keyboard():
         [
             InlineKeyboardButton("🌐 Open App", web_app=WebAppInfo(url=_app_url())),
         ],
+        [
+            InlineKeyboardButton(
+                f"{'🟢 Free Proxy: ON' if FREE_PROXY else '🔴 Free Proxy: OFF'}",
+                callback_data="toggle_free_proxy"
+            ),
+            InlineKeyboardButton("🔑 Set Proxy", callback_data="ask_proxy"),
+        ],
     ]
 
 def main_menu_text():
@@ -1192,6 +1306,54 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode="Markdown"
             )
+        return
+
+    elif data == "toggle_free_proxy":
+        global FREE_PROXY
+        FREE_PROXY = not FREE_PROXY
+        config["free_proxy"] = FREE_PROXY
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+        if FREE_PROXY:
+            await query.answer("🟢 Free Proxy ON — new IP each signup")
+            await query.edit_message_text(
+                "🟢 *Free Proxy: ON*\n\n"
+                "Each signup uses a fresh free proxy IP\n"
+                "matched to your selected region.\n\n"
+                "⚠️ Free proxies are slower and less reliable.\n"
+                "For best results, use 🔑 Set Proxy with a paid/residential proxy.\n\n"
+                "Tap below to go back.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("« Back to menu", callback_data="back_to_menu")]]
+                ),
+                parse_mode="Markdown"
+            )
+        else:
+            await query.answer("🔴 Free Proxy OFF — direct connection")
+            await query.edit_message_text(
+                "🔴 *Free Proxy: OFF*\n\n"
+                "Direct connection from Render's server.\n"
+                "Sites see a US datacenter IP.\n\n"
+                "Tap below to go back.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("« Back to menu", callback_data="back_to_menu")]]
+                ),
+                parse_mode="Markdown"
+            )
+        return
+
+    elif data == "ask_proxy":
+        PENDING_INPUT[query.message.chat_id] = "proxy"
+        await query.edit_message_text(
+            "🔑 *Send me your proxy*\n\n"
+            "Formats:\n"
+            "`http://host:port`\n"
+            "`http://user:pass@host:port`\n"
+            "`socks5://host:port`\n\n"
+            "Or send `off` to remove the proxy.\n\n"
+            "Where to get one: BrightData, IPRoyal, or your VPN provider.",
+            parse_mode="Markdown"
+        )
         return
 
     elif data == "ask_region":
@@ -1428,19 +1590,30 @@ async def test_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with async_playwright() as p:
             browser = await launch_chromium(p)
-            context = await browser.new_context(**region_options())
+            ctx_proxy = await get_context_proxy()
+            context = await browser.new_context(**region_options(proxy=ctx_proxy))
             page = await context.new_page()
             await page.goto(WEBSITE_URL, timeout=30000, wait_until="domcontentloaded")
             title = await page.title()
             mapping = await wait_for_form_ready(page, timeout_ms=10000)
+            # Check what IP the site sees
+            ip = "?"
+            try:
+                await page.goto("https://api.ipify.org?format=json", timeout=15000)
+                ip = (await page.inner_text("body"))[:80]
+            except Exception:
+                pass
             await browser.close()
             r = REGIONS.get(ACTIVE_REGION, REGIONS["nigeria"])
+            proxy_line = PROXY_URL if PROXY_URL else ("Free proxy" if FREE_PROXY else "None (direct)")
             await update.message.reply_text(
                 f"✅ Connected! (v{BOT_VERSION})\n\n"
                 f"Website: {WEBSITE_URL}\n"
                 f"Title: {title}\n"
                 f"Form fields found: {len(mapping.get('fields', {}))}\n"
-                f"Region: {r['label']}"
+                f"Region: {r['label']}\n"
+                f"Proxy: {proxy_line}\n"
+                f"Your IP: {ip}"
             )
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {str(e)}")
@@ -1513,7 +1686,7 @@ async def otp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending = PENDING_INPUT.get(chat_id)
     if pending:
         PENDING_INPUT.pop(chat_id, None)
-        global WEBSITE_URL, OVERRIDE_EMAIL
+        global WEBSITE_URL, OVERRIDE_EMAIL, PROXY_URL
         if pending == "learn_url":
             url = WEBSITE_URL if text.lower() == "here" else text
             if not url.startswith("http"):
@@ -1579,6 +1752,25 @@ async def otp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"✅ Email saved: `{OVERRIDE_EMAIL}`", parse_mode="Markdown")
             else:
                 await update.message.reply_text("✅ Back to random auto-generated emails.")
+        elif pending == "proxy":
+            if text.lower() in ("off", "none", "remove", "clear"):
+                PROXY_URL = ""
+            elif "://" in text or ":" in text:
+                if not parse_proxy(text):
+                    await update.message.reply_text("❌ Couldn't parse that proxy. Format: `http://host:port` or `http://user:pass@host:port`", parse_mode="Markdown")
+                    return
+                PROXY_URL = text
+            else:
+                await update.message.reply_text("❌ Send a proxy like `http://host:port` (or `off`).", parse_mode="Markdown")
+                return
+            config["proxy_url"] = PROXY_URL
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            if PROXY_URL:
+                parsed = parse_proxy(PROXY_URL)
+                await update.message.reply_text(f"✅ Proxy saved: `{parsed['server']}`", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("✅ Proxy removed — direct connection.")
         return
     
     # 2) Waiting for an OTP code
@@ -1608,6 +1800,7 @@ async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Email: {OVERRIDE_EMAIL if OVERRIDE_EMAIL else 'random (auto)'}\n"
         f"Region: {r['label']} ({r['tz']})\n"
         f"Browser: {BROWSER_ENGINE}\n"
+        f"Proxy: {PROXY_URL if PROXY_URL else ('Free (auto)' if FREE_PROXY else 'None')}\n"
         f"Referral: `{REFERRAL_CODE}`\n"
         f"Name pool: {len(NAME_POOL)} names\n"
         f"Accounts created: {len(users)}\n\n"
@@ -1770,6 +1963,8 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "url": WEBSITE_URL,
                 "region": ACTIVE_REGION,
                 "auto_otp": AUTO_OTP,
+                "proxy": PROXY_URL,
+                "free_proxy": FREE_PROXY,
                 "total_accounts": len(users),
                 "job": WEB_STATUS,
             })
@@ -1793,7 +1988,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         except Exception:
             data = {}
         
-        global AUTO_OTP, ACTIVE_REGION, WEBSITE_URL
+        global AUTO_OTP, ACTIVE_REGION, WEBSITE_URL, PROXY_URL, FREE_PROXY
         
         if path == "/api/start":
             count = int(data.get("count", 1))
@@ -1821,9 +2016,23 @@ class HealthHandler(BaseHTTPRequestHandler):
             if "url" in data and str(data["url"]).startswith("http"):
                 WEBSITE_URL = str(data["url"]).strip()
                 config["website_url"] = WEBSITE_URL
+            if "proxy" in data:
+                pval = str(data["proxy"]).strip()
+                if pval.lower() in ("", "off", "none"):
+                    PROXY_URL = ""
+                elif parse_proxy(pval):
+                    PROXY_URL = pval
+                config["proxy_url"] = PROXY_URL
+            if "free_proxy" in data:
+                FREE_PROXY = bool(data["free_proxy"])
+                config["free_proxy"] = FREE_PROXY
             with open(CONFIG_PATH, "w") as f:
                 json.dump(config, f, indent=2)
-            return _json_response(self, 200, {"message": "💾 Saved", "auto_otp": AUTO_OTP, "region": ACTIVE_REGION, "url": WEBSITE_URL})
+            return _json_response(self, 200, {
+                "message": "💾 Saved", "auto_otp": AUTO_OTP,
+                "region": ACTIVE_REGION, "url": WEBSITE_URL,
+                "proxy": PROXY_URL, "free_proxy": FREE_PROXY
+            })
         
         return _json_response(self, 404, {"error": "not found"})
     
