@@ -1,4 +1,4 @@
-BOT_VERSION = "5.2"
+BOT_VERSION = "5.3"
 
 import os
 import re
@@ -180,11 +180,19 @@ def save_learned(data):
 DETECT_FORM_JS = """
 () => {
   const KEYWORDS = {
-    name:     ["full name", "your name", "name", "username", "fullname"],
-    phone:    ["phone number", "phone", "mobile", "tel", "whatsapp"],
-    email:    ["email address", "email", "e-mail", "mail"],
-    password: ["password", "passcode", "pass"],
-    referral: ["referral", "invite", "invite code", "ref", "referral code", "code"]
+    username:         ["username", "user name", "handle"],
+    name:             ["full name", "your name", "name", "fullname"],
+    phone:            ["phone number", "phone", "mobile", "tel", "whatsapp"],
+    email:            ["email address", "email", "e-mail", "mail"],
+    confirm_password: ["confirm password", "repeat password", "re-enter password", "retype password", "confirm pass"],
+    password:         ["password", "passcode", "pass"],
+    referral:         ["referral", "invite", "invite code", "referral code", "ref"],
+    gender:           ["gender", "sex"],
+    dob:              ["date of birth", "birth date", "dob", "birthday"],
+    address:          ["address", "street", "home address"],
+    city:             ["city", "town"],
+    state:            ["state", "province"],
+    country:          ["country", "nation"]
   };
   const labels = {};
   document.querySelectorAll("label[for]").forEach(l => {
@@ -193,9 +201,8 @@ DETECT_FORM_JS = """
   const fields = {};
   const describe = el => {
     const id = el.id ? "#" + el.id : "";
-    const name = el.name ? `input[name="${el.name}"]` : "";
+    const name = el.name ? `${el.tagName.toLowerCase()}[name="${el.name}"]` : "";
     const placeholder = el.placeholder ? `[placeholder*="${el.placeholder}"]` : "";
-    // prefer id, then name, then placeholder
     return id || name || placeholder || "";
   };
   document.querySelectorAll("input, textarea, select").forEach(el => {
@@ -217,13 +224,13 @@ DETECT_FORM_JS = """
       }
     }
   });
-  // submit button
+  // submit/next button
   let submit = "";
   const btns = [...document.querySelectorAll("button, input[type=submit], a[role=button], .submit")];
   for (const b of btns) {
     const t = ((b.innerText || b.value || "") + " " + (b.className || "") + " " + (b.id || "")).toLowerCase();
-    if (t.includes("create account") || t.includes("sign up") || t.includes("register") || t.includes("submit") || b.id === "submitbtn" || b.className.includes("submit")) {
-      submit = b.id ? "#" + b.id : (b.className ? "." + b.className.trim().split(/\\s+/)[0] : "");
+    if (t.includes("create account") || t.includes("sign up") || t.includes("register") || t.includes("submit") || t.includes("next") || t.includes("continue") || t.includes("proceed") || b.id === "submitbtn" || (b.className && b.className.includes("submit"))) {
+      submit = b.id ? "#" + b.id : (b.className && b.className.includes("submit") ? "." + b.className.trim().split(/\\s+/)[0] : "");
       if (!submit && b.tagName === "BUTTON") submit = "button[type=submit]";
       break;
     }
@@ -236,8 +243,23 @@ DETECT_FORM_JS = """
 # What filled data each field expects
 FIELD_VALUES = {
     "name": "full_name", "phone": "phone", "email": "email",
-    "password": "password", "referral": "referral_code"
+    "password": "password", "referral": "referral_code",
+    "confirm_password": "password", "username": "username",
+    "gender": "gender", "dob": "dob", "address": "address",
+    "city": "city", "state": "state", "country": "country"
 }
+
+def extra_signup_values(username):
+    """Plausible values for common extra wizard-step fields."""
+    return {
+        "username": username,
+        "gender": random.choice(["Male", "Female"]),
+        "dob": f"{random.randint(1995, 2003)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
+        "address": f"{random.randint(1, 99)} {random.choice(['Aba Road', 'Ikoyi Street', 'Ahmadu Bello Way', 'Zik Avenue', 'Ogui Road'])}",
+        "city": random.choice(["Lagos", "Abuja", "Port Harcourt", "Kano", "Ibadan"]),
+        "state": random.choice(["Lagos", "Abuja FCT", "Rivers", "Kano", "Oyo"]),
+        "country": "Nigeria"
+    }
 
 # Runs inside the page: returns selector of OTP input, or null
 OTP_DETECT_JS = """
@@ -362,108 +384,149 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                 await page.goto(WEBSITE_URL, timeout=45000, wait_until="domcontentloaded")
                 await page.wait_for_timeout(2000)
                 
-                # Get selectors: learned mapping preferred, else detect live
-                mapping = learned or await detect_form(page)
-                fields = mapping.get("fields", {})
-                submit_sel = mapping.get("submit", "#submitBtn")
-                
-                if not fields.get("name") or not fields.get("email") or not fields.get("password"):
-                    try:
-                        title = await page.title()
-                        body_text = (await page.inner_text("body"))[:300]
-                        last_error = f"Form fields not found (name:{'name' in fields}, email:{'email' in fields}, password:{'password' in fields}). Page title: '{title}'. Body: {body_text}"
-                    except Exception:
-                        last_error = "Form fields not found and page unreadable"
-                    continue
-                
                 values = {
                     "full_name": full_name, "phone": phone,
                     "email": email, "password": password,
                     "referral_code": REFERRAL_CODE
                 }
-                # Fill each detected field (skip optional ones the page lacks)
-                for field, selector in fields.items():
-                    value = values.get(FIELD_VALUES.get(field, field))
-                    if not value or not selector:
-                        continue
-                    try:
-                        await page.fill(selector, value)
-                    except Exception:
-                        pass  # optional field (e.g. referral) may not fill
+                values.update(extra_signup_values(email.split("@")[0]))
                 
-                await page.wait_for_timeout(500)
+                attempt_failed = False
                 
-                await page.click(submit_sel)
-                await page.wait_for_timeout(5000)
-                
-                # Check if the site demands an OTP/verification code
-                otp_sel = None
-                try:
-                    otp_sel = await page.evaluate(OTP_DETECT_JS)
-                except Exception:
-                    pass
-                
-                if otp_sel and bot and otp_chat_id:
-                    # Screenshot the OTP page and ask the owner for the code
-                    otp_shot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_shot.png")
-                    try:
-                        await page.screenshot(path=otp_shot)
-                    except Exception:
-                        otp_shot = None
-                    code = await request_otp(bot, otp_chat_id, otp_shot, page.url)
-                    if not code:
-                        await browser.close()
-                        browser = None
-                        return False, "OTP not provided (cancelled or timed out)", email, phone
-                    try:
-                        if otp_sel == "TEXT_PROMPT":
-                            # Could not pin the input - try common OTP selectors
-                            for sel in ['input[autocomplete="one-time-code"]', 'input[name*="otp" i]',
-                                        'input[placeholder*="code" i]', 'input[type="tel"]', 'input[type="text"]']:
-                                try:
-                                    await page.fill(sel, code)
-                                    otp_sel = sel
-                                    break
-                                except Exception:
-                                    continue
-                        else:
-                            await page.fill(otp_sel, code)
-                        # Submit the OTP (same button, or Enter)
+                # Multi-step wizard: fill -> click next/submit -> repeat (max 6 steps)
+                for step in range(6):
+                    mapping = (learned if step == 0 else None) or await detect_form(page)
+                    fields = mapping.get("fields", {})
+                    submit_sel = mapping.get("submit", "#submitBtn")
+                    
+                    if step == 0 and not (fields.get("name") or fields.get("username")):
                         try:
-                            await page.click(submit_sel)
+                            title = await page.title()
+                            body_text = (await page.inner_text("body"))[:300]
+                            last_error = f"Form fields not found. Page title: '{title}'. Body: {body_text}"
                         except Exception:
-                            await page.keyboard.press("Enter")
-                        await page.wait_for_timeout(5000)
-                    except Exception as e:
+                            last_error = "Form fields not found and page unreadable"
+                        attempt_failed = True
+                        break
+                    
+                    # Fill every field this step exposes
+                    for field, selector in fields.items():
+                        value = values.get(FIELD_VALUES.get(field, field))
+                        if not value or not selector:
+                            continue
+                        try:
+                            await page.fill(selector, value)
+                        except Exception:
+                            try:
+                                await page.select_option(selector, label=value)
+                            except Exception:
+                                try:
+                                    await page.select_option(selector, value)
+                                except Exception:
+                                    pass  # optional/unknown field
+                    
+                    await page.wait_for_timeout(500)
+                    
+                    # Click Next / Continue / Submit (whichever exists)
+                    clicked = False
+                    for sel in (submit_sel, "button:has-text('Next')", "button:has-text('Continue')",
+                                "button:has-text('Proceed')", "button:has-text('Next Step')",
+                                "input[type=submit]"):
+                        try:
+                            await page.click(sel, timeout=3000)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        last_error = f"Step {step + 1}: no Next/Submit button found"
+                        attempt_failed = True
+                        break
+                    
+                    await page.wait_for_timeout(4000)
+                    
+                    # OTP step? (interactive only)
+                    otp_sel = None
+                    try:
+                        otp_sel = await page.evaluate(OTP_DETECT_JS)
+                    except Exception:
+                        pass
+                    
+                    if otp_sel and bot and otp_chat_id:
+                        otp_shot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otp_shot.png")
+                        try:
+                            await page.screenshot(path=otp_shot)
+                        except Exception:
+                            otp_shot = None
+                        code = await request_otp(bot, otp_chat_id, otp_shot, page.url)
+                        if not code:
+                            await browser.close()
+                            browser = None
+                            return False, "OTP not provided (cancelled or timed out)", email, phone
+                        try:
+                            if otp_sel == "TEXT_PROMPT":
+                                for sel in ['input[autocomplete="one-time-code"]', 'input[name*="otp" i]',
+                                            'input[placeholder*="code" i]', 'input[type="tel"]', 'input[type="text"]']:
+                                    try:
+                                        await page.fill(sel, code)
+                                        otp_sel = sel
+                                        break
+                                    except Exception:
+                                        continue
+                            else:
+                                await page.fill(otp_sel, code)
+                            try:
+                                await page.click(submit_sel)
+                            except Exception:
+                                await page.keyboard.press("Enter")
+                            await page.wait_for_timeout(5000)
+                        except Exception as e:
+                            await browser.close()
+                            browser = None
+                            return False, f"OTP fill failed: {str(e)}", email, phone
+                    elif otp_sel:
                         await browser.close()
                         browser = None
-                        return False, f"OTP fill failed: {str(e)}", email, phone
-                elif otp_sel:
-                    # OTP needed but no interactive session (batch mode)
-                    await browser.close()
-                    browser = None
-                    return False, "Site requires OTP — use /newuser (interactive) or /setemail", email, phone
+                        return False, "Site requires OTP — use /newuser (interactive) or /setemail", email, phone
+                    
+                    # Success check: left the form flow, or landed on a done-ish page
+                    page_content = await page.content()
+                    current_url = page.url.lower()
+                    body_l = ""
+                    try:
+                        body_l = (await page.inner_text("body")).lower()
+                    except Exception:
+                        pass
+                    
+                    success_markers = ("dashboard", "/home", "welcome", "success", "congrat",
+                                       "verify", "logout", "account created", "check your email")
+                    if (any(k in current_url for k in success_markers)
+                            or "register" not in current_url and "login" not in current_url
+                            or any(k in body_l for k in ("welcome", "congratulations", "account created", "verify your email"))):
+                        return True, "Account created!", email, phone
+                    
+                    # Error box on this step?
+                    err_match = re.search(r'class="error"[^>]*>(.*?)</div>', page_content, re.S)
+                    if err_match:
+                        err_text = re.sub(r'<[^>]+>', '', err_match.group(1)).strip()
+                        last_error = err_text
+                        attempt_failed = True
+                        break
+                    
+                    # Otherwise assume another form step appeared - loop continues
                 
-                page_content = await page.content()
-                current_url = page.url
-                await browser.close()
-                browser = None
-                
-                # Success: redirected away from register page
-                if "register" not in current_url.lower():
-                    return True, "Account created!", email, phone
-                
-                # Extract actual error message from the error box
-                err_match = re.search(r'class="error"[^>]*>(.*?)</div>', page_content, re.S)
-                if err_match:
-                    err_text = re.sub(r'<[^>]+>', '', err_match.group(1)).strip()
-                    last_error = err_text
+                if attempt_failed:
                     # Duplicate data - retry with fresh email/phone
-                    if "already" in err_text.lower():
+                    if last_error and "already" in last_error.lower():
                         continue
-                    return False, err_text, email, phone
+                    if last_error and last_error.startswith("Step"):
+                        return False, last_error, email, phone
+                    if "Form fields not found" not in (last_error or ""):
+                        return False, last_error or "Unknown step failure", email, phone
+                    continue
                 
-                last_error = "No redirect, no error box (page may have changed)"
+                # Loop exhausted without success or a clear error
+                last_error = "Signup wizard did not finish in 6 steps (page may need manual handling)"
         except Exception as e:
             last_error = f"Error: {str(e)}"
         finally:
