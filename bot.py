@@ -1,4 +1,4 @@
-BOT_VERSION = "4.7"
+BOT_VERSION = "5.0"
 
 import os
 import re
@@ -121,8 +121,141 @@ def generate_unique_name():
     local, domain = email.split("@")
     return username, f"{local}{random.randint(100, 999)}@{domain}"
 
+# ---------- Auto-learn form detection ----------
+LEARNED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "learned_form.json")
+
+def load_learned():
+    try:
+        with open(LEARNED_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_learned(data):
+    try:
+        with open(LEARNED_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Save learned form error: {e}")
+
+# Runs inside the page: maps every input to a field by label/name/id/placeholder
+DETECT_FORM_JS = """
+() => {
+  const KEYWORDS = {
+    name:     ["full name", "your name", "name", "username", "fullname"],
+    phone:    ["phone number", "phone", "mobile", "tel", "whatsapp"],
+    email:    ["email address", "email", "e-mail", "mail"],
+    password: ["password", "passcode", "pass"],
+    referral: ["referral", "invite", "invite code", "ref", "referral code", "code"]
+  };
+  const labels = {};
+  document.querySelectorAll("label[for]").forEach(l => {
+    labels[l.getAttribute("for")] = (l.innerText || "").trim().toLowerCase();
+  });
+  const fields = {};
+  const describe = el => {
+    const id = el.id ? "#" + el.id : "";
+    const name = el.name ? `input[name="${el.name}"]` : "";
+    const placeholder = el.placeholder ? `[placeholder*="${el.placeholder}"]` : "";
+    // prefer id, then name, then placeholder
+    return id || name || placeholder || "";
+  };
+  document.querySelectorAll("input, textarea, select").forEach(el => {
+    const type = (el.type || el.tagName.toLowerCase()).toLowerCase();
+    if (["hidden", "submit", "button", "checkbox", "radio", "image"].includes(type)) return;
+    const id = el.id || "";
+    const text = [
+      labels[id] || "",
+      (el.name || "").toLowerCase(),
+      id.toLowerCase(),
+      (el.placeholder || "").toLowerCase(),
+      (el.getAttribute("aria-label") || "").toLowerCase()
+    ].join(" ");
+    for (const [field, kws] of Object.entries(KEYWORDS)) {
+      if (fields[field]) continue;
+      if (type === field || kws.some(k => text.includes(k))) {
+        fields[field] = describe(el);
+        break;
+      }
+    }
+  });
+  // submit button
+  let submit = "";
+  const btns = [...document.querySelectorAll("button, input[type=submit], a[role=button], .submit")];
+  for (const b of btns) {
+    const t = ((b.innerText || b.value || "") + " " + (b.className || "") + " " + (b.id || "")).toLowerCase();
+    if (t.includes("create account") || t.includes("sign up") || t.includes("register") || t.includes("submit") || b.id === "submitbtn" || b.className.includes("submit")) {
+      submit = b.id ? "#" + b.id : (b.className ? "." + b.className.trim().split(/\\s+/)[0] : "");
+      if (!submit && b.tagName === "BUTTON") submit = "button[type=submit]";
+      break;
+    }
+  }
+  if (!submit) submit = "button[type=submit], .submit, button";
+  return { fields, submit };
+}
+"""
+
+# What filled data each field expects
+FIELD_VALUES = {
+    "name": "full_name", "phone": "phone", "email": "email",
+    "password": "password", "referral": "referral_code"
+}
+
+async def detect_form(page):
+    """Detect form fields in the open page. Returns {fields:{...}, submit:str}."""
+    return await page.evaluate(DETECT_FORM_JS)
+
+def mapping_report(mapping):
+    """Human-readable report of a detected mapping."""
+    fields = mapping.get("fields", {})
+    lines = []
+    labels = {"name": "Full name", "phone": "Phone", "email": "Email", "password": "Password", "referral": "Referral"}
+    for key in ["name", "phone", "email", "password", "referral"]:
+        if key in fields:
+            lines.append(f"  ✅ {labels[key]} → `{fields[key]}`")
+        else:
+            lines.append(f"  ⚠️ {labels[key]} → not found")
+    lines.append(f"  🔘 Submit → `{mapping.get('submit', '?')}`")
+    return "\n".join(lines)
+
+async def learn_form(url):
+    """Visit url, screenshot the page, detect the signup form.
+    Returns (screenshot_path_or_None, mapping, error_or_None)."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 900}, locale="en-US"
+        )
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
+        page = await context.new_page()
+        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)
+        
+        shot = None
+        try:
+            shot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "learn_shot.png")
+            await page.screenshot(path=shot, full_page=True)
+        except Exception:
+            pass
+        
+        mapping = await detect_form(page)
+        await browser.close()
+        
+        if not mapping.get("fields"):
+            return shot, mapping, "No form fields found on this page."
+        return shot, mapping, None
+
 async def signup_on_website(full_name, phone, email, password, max_attempts=3):
     last_error = "Unknown error"
+    # Use learned mapping for this URL, or auto-detect live
+    learned = load_learned().get(WEBSITE_URL)
     for attempt in range(max_attempts):
         # Fresh data each attempt
         if attempt > 0:
@@ -151,32 +284,40 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3):
                 
                 # domcontentloaded is reliable; networkidle hangs on analytics beacons
                 await page.goto(WEBSITE_URL, timeout=45000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(2000)
                 
-                try:
-                    await page.wait_for_selector("#name", state="attached", timeout=30000)
-                except Exception:
-                    # Form not there - reload once and wait again
+                # Get selectors: learned mapping preferred, else detect live
+                mapping = learned or await detect_form(page)
+                fields = mapping.get("fields", {})
+                submit_sel = mapping.get("submit", "#submitBtn")
+                
+                if not fields.get("name") or not fields.get("email") or not fields.get("password"):
                     try:
-                        await page.reload(timeout=45000, wait_until="domcontentloaded")
-                        await page.wait_for_selector("#name", state="attached", timeout=30000)
+                        title = await page.title()
+                        body_text = (await page.inner_text("body"))[:300]
+                        last_error = f"Form fields not found (name:{'name' in fields}, email:{'email' in fields}, password:{'password' in fields}). Page title: '{title}'. Body: {body_text}"
                     except Exception:
-                        # Diagnostic: what did the browser actually see?
-                        try:
-                            title = await page.title()
-                            body_text = (await page.inner_text("body"))[:300]
-                            last_error = f"Form not found. Page title: '{title}'. Body: {body_text}"
-                        except Exception:
-                            last_error = "Form not found and page unreadable"
-                        continue
+                        last_error = "Form fields not found and page unreadable"
+                    continue
                 
-                await page.fill("#name", full_name)
-                await page.fill("#phone", phone)
-                await page.fill("#email", email)
-                await page.fill("#password", password)
+                values = {
+                    "full_name": full_name, "phone": phone,
+                    "email": email, "password": password,
+                    "referral_code": REFERRAL_CODE
+                }
+                # Fill each detected field (skip optional ones the page lacks)
+                for field, selector in fields.items():
+                    value = values.get(FIELD_VALUES.get(field, field))
+                    if not value or not selector:
+                        continue
+                    try:
+                        await page.fill(selector, value)
+                    except Exception:
+                        pass  # optional field (e.g. referral) may not fill
                 
                 await page.wait_for_timeout(500)
                 
-                await page.click("#submitBtn")
+                await page.click(submit_sel)
                 await page.wait_for_timeout(5000)
                 
                 page_content = await page.content()
@@ -546,14 +687,70 @@ async def show_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
         return
     
+    learned = load_learned().get(WEBSITE_URL)
+    learned_line = "✅ Learned" if learned else "❌ Not learned (using live detection)"
+    
     await update.message.reply_text(
         f"⚙️ *Settings (v{BOT_VERSION})*\n\n"
         f"Website: {WEBSITE_URL}\n"
+        f"Form: {learned_line}\n"
         f"Referral: {REFERRAL_CODE}\n"
         f"Name pool: {len(NAME_POOL)} names\n"
         f"Accounts created: {len(users)}",
         parse_mode="Markdown"
     )
+
+async def learn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Visit a signup page, screenshot it, detect the form, save the mapping."""
+    if update.message.from_user.id != OWNER_ID:
+        return
+    
+    url = context.args[0] if context.args else WEBSITE_URL
+    await update.message.reply_text(
+        f"🔍 *Learning form... (v{BOT_VERSION})*\n\nVisiting:\n`{url}`\n\n"
+        "Reading labels, inputs and buttons...", parse_mode="Markdown")
+    
+    try:
+        shot, mapping, error = await learn_form(url)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to open page: {str(e)}")
+        return
+    
+    # Send the screenshot so you can see what the bot saw
+    if shot and os.path.exists(shot):
+        try:
+            with open(shot, "rb") as photo:
+                await update.message.reply_photo(
+                    photo, caption=f"📸 What the bot sees on:\n{url}"
+                )
+        except Exception:
+            pass
+    
+    if error and not mapping.get("fields"):
+        await update.message.reply_text(f"❌ *Learn failed*\n\n{error}", parse_mode="Markdown")
+        return
+    
+    report = mapping_report(mapping)
+    detected = len(mapping.get("fields", {}))
+    
+    if detected >= 3:
+        # Save mapping for this URL
+        data = load_learned()
+        data[url] = mapping
+        save_learned(data)
+        await update.message.reply_text(
+            f"✅ *Form learned! (v{BOT_VERSION})*\n\n"
+            f"Detected {detected}/5 fields:\n{report}\n\n"
+            f"Saved. Signups on this URL will use these selectors.",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ *Weak detection (v{BOT_VERSION})*\n\n{report}\n\n"
+            f"Only {detected} fields found — not saved. "
+            f"Site may need JavaScript or a login step.",
+            parse_mode="Markdown"
+        )
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -580,6 +777,7 @@ async def post_init(app):
     
     new_commands = [
         BotCommand("start", "Show bot info"),
+        BotCommand("learn", "Teach bot a signup page (auto-detect form)"),
         BotCommand("newuser", "Auto create new account"),
         BotCommand("list", "View all created accounts"),
         BotCommand("test", "Test connection to website"),
@@ -632,6 +830,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(CommandHandler("learn", learn_cmd))
     app.add_handler(CommandHandler("newuser", new_user))
     app.add_handler(CommandHandler("list", list_users))
     app.add_handler(CommandHandler("test", test_connection))
