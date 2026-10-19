@@ -1,4 +1,4 @@
-BOT_VERSION = "5.12"
+BOT_VERSION = "5.13"
 
 import os
 import re
@@ -739,6 +739,33 @@ async def _try_click(page, locator, timeout=2000):
     except Exception:
         return False
 
+async def reveal_form(page):
+    """Many sites (Swagbucks, etc.) hide the signup form behind
+    'Continue with Email' / 'Join free' / 'Sign up with email'.
+    Click that first so the real form appears."""
+    reveal_texts = (
+        r"continue with email|sign up with email|join with email|"
+        r"email only|use email|register with email|"
+        r"join for free|join free|sign up free|"
+        r"create (an? )?account|get started|"
+        r"sign up|register|join now"
+    )
+    try:
+        el = page.get_by_role("button", name=re.compile(reveal_texts, re.I)).first
+        await _try_click(page, el, timeout=2500)
+        await page.wait_for_timeout(2000)
+    except Exception:
+        pass
+    # Also try links / divs with those texts (SPA buttons)
+    try:
+        el = page.locator("a, button, [role=button], span, div").filter(
+            has_text=re.compile(reveal_texts, re.I)
+        ).first
+        await _try_click(page, el, timeout=1500)
+        await page.wait_for_timeout(1500)
+    except Exception:
+        pass
+
 async def click_submit(page, submit_sel=None):
     """Robust submit/Next button click — waterfall of strategies from top
     automation repos (sentri, buttonmash, playwright best-practices).
@@ -831,12 +858,15 @@ async def click_submit(page, submit_sel=None):
     return False
 
 async def signup_on_website(full_name, phone, email, password, max_attempts=3,
-                            otp_chat_id=None, bot=None, otp_token=None):
+                            otp_chat_id=None, bot=None, otp_token=None, stop_event=None):
+    # stop_event: asyncio.Event — checked between steps so Stop actually cancels
     # otp_token = mail.tm bearer token -> read OTP from temp inbox automatically
     last_error = "Unknown error"
     # Use learned mapping for this URL, or auto-detect live
     learned = load_learned().get(WEBSITE_URL)
     for attempt in range(max_attempts):
+        if stop_event and stop_event.is_set():
+            return False, "Cancelled by user", email, phone
         # Fresh data each attempt (keep same email if override set - OTP must reach it)
         if attempt > 0:
             phone = generate_phone()
@@ -856,8 +886,16 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                 
                 # domcontentloaded is reliable; networkidle hangs on analytics beacons
                 await page.goto(WEBSITE_URL, timeout=45000, wait_until="domcontentloaded")
+                if stop_event and stop_event.is_set():
+                    await browser.close()
+                    browser = None
+                    return False, "Cancelled by user", email, phone
                 # Wait through loading animations/spinners until form appears
                 wait_mapping = await wait_for_form_ready(page, timeout_ms=25000)
+                if stop_event and stop_event.is_set():
+                    await browser.close()
+                    browser = None
+                    return False, "Cancelled by user", email, phone
                 
                 values = {
                     "full_name": full_name, "phone": phone,
@@ -870,6 +908,10 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                 
                 # Multi-step wizard: fill -> click next/submit -> repeat (max 6 steps)
                 for step in range(6):
+                    if stop_event and stop_event.is_set():
+                        await browser.close()
+                        browser = None
+                        return False, "Cancelled by user", email, phone
                     mapping = (learned if step == 0 else None) or wait_mapping or await detect_form(page)
                     fields = mapping.get("fields", {})
                     submit_sel = mapping.get("submit", "#submitBtn")
@@ -894,9 +936,13 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                             try:
                                 title = await page.title()
                                 body_text = (await page.inner_text("body"))[:300]
-                                last_error = f"Form fields not found. Page title: '{title}'. Body: {body_text}"
+                                # Blank page = almost certainly rate-limited / blocked
+                                if not title.strip() and not body_text.strip():
+                                    last_error = "RATE-LIMITED: page is blank (site blocked us)"
+                                else:
+                                    last_error = f"Form fields not found. Page title: '{title}'. Body: {body_text}"
                             except Exception:
-                                last_error = "Form fields not found and page unreadable"
+                                last_error = "Form fields not found and page unreadable (possibly blocked)"
                             attempt_failed = True
                             break
                     
@@ -1016,6 +1062,14 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                     if err_match:
                         err_text = re.sub(r'<[^>]+>', '', err_match.group(1)).strip()
                         last_error = err_text
+                        # Rate-limit / block detected — abort immediately, don't waste attempts
+                        low = err_text.lower()
+                        if any(k in low for k in (
+                            "too many", "rate limit", "try again later", "temporarily blocked",
+                            "suspended", "abuse", "flood", "multiple accounts",
+                            "vpn", "proxy", "datacenter", "bot", "automated"
+                        )):
+                            return False, f"BLOCKED: {err_text}", email, phone
                         attempt_failed = True
                         break
                     
@@ -1113,8 +1167,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Cancel any waiting input (url/email/OTP prompt)
     PENDING_INPUT.pop(update.message.chat_id, None)
     
+    # /start also STOPS any running batch — you asked for this
+    stopped = False
+    if JOB.get("active") and JOB.get("event") and not JOB["event"].is_set():
+        JOB["event"].set()
+        stopped = True
+    
+    header = "⏹ Batch STOPPING — finishing current account...\n\n" if stopped else ""
     await update.message.reply_text(
-        main_menu_text(),
+        header + main_menu_text(),
         reply_markup=InlineKeyboardMarkup(main_menu_keyboard()),
         parse_mode="Markdown"
     )
@@ -1173,7 +1234,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Strip Markdown-dangerous chars so Telegram never rejects the message
             return re.sub(r'([_*`\[\]])', r'\\\1', t)
         
-        status = {"done": 0, "created": [], "failed": 0, "total": count, "errors": []}
+        status = {"done": 0, "created": [], "failed": 0, "total": count, "errors": [], "consecutive_fail": 0}
         
         await query.edit_message_text(progress_text(), reply_markup=stop_btn, parse_mode="Markdown")
         
@@ -1202,6 +1263,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with sem:
                 if JOB["event"].is_set():
                     return
+                # Adaptive delay: longer wait after failures (rate-limit recovery)
+                consecutive = status.get("consecutive_fail", 0)
+                if consecutive >= 2:
+                    delay = random.uniform(15, 30)  # back off hard
+                elif consecutive == 1:
+                    delay = random.uniform(8, 15)
+                else:
+                    delay = random.uniform(4, 10)
+                await asyncio.sleep(delay)
+                if JOB["event"].is_set():
+                    return
                 full_name = generate_full_name()
                 phone = generate_phone()
                 username, email = generate_unique_name()
@@ -1212,6 +1284,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     temp_email, otp_token = await create_temp_inbox()
                     if not temp_email:
                         status["failed"] += 1
+                        status["consecutive_fail"] = status.get("consecutive_fail", 0) + 1
                         status["errors"].append(f"{email}: temp inbox (mail.tm) unavailable")
                         status["done"] += 1
                         await live_update(force=True)
@@ -1219,7 +1292,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     email = temp_email
                 
                 success, message, final_email, final_phone = await signup_on_website(
-                    full_name, phone, email, password, otp_token=otp_token)
+                    full_name, phone, email, password, otp_token=otp_token,
+                    stop_event=JOB["event"])
                 
                 if success:
                     users[final_email] = {
@@ -1230,10 +1304,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "status": "active"
                     }
                     status["created"].append(final_email)
+                    status["consecutive_fail"] = 0  # reset on success
                     save_users(users)
                 else:
                     status["failed"] += 1
+                    status["consecutive_fail"] = status.get("consecutive_fail", 0) + 1
                     status["errors"].append(f"{final_email}: {message}")
+                    # Site is blocking us — stop the whole batch immediately
+                    if message.startswith("BLOCKED") or message.startswith("RATE-LIMITED"):
+                        JOB["event"].set()
+                    # 4+ consecutive empty pages = rate-limited, stop wasting time
+                    elif status["consecutive_fail"] >= 4 and ("Form fields not found" in message or "RATE-LIMITED" in message):
+                        JOB["event"].set()
+                        status["errors"].append("⚠️ Rate-limited (4+ failures in a row) — batch stopped automatically")
                 status["done"] += 1
                 await live_update(force=True)
         
@@ -1875,7 +1958,7 @@ async def web_run_batch(count):
     if JOB.get("active") or WEB_STATUS.get("active"):
         return False
     JOB["active"] = True
-    WEB_STATUS.update({"done": 0, "created": [], "failed": 0, "total": count, "errors": [], "active": True})
+    WEB_STATUS.update({"done": 0, "created": [], "failed": 0, "total": count, "errors": [], "active": True, "consecutive_fail": 0})
     JOB["event"] = asyncio.Event()
     sem = asyncio.Semaphore(1)
     
@@ -1883,6 +1966,17 @@ async def web_run_batch(count):
         if JOB["event"].is_set():
             return
         async with sem:
+            if JOB["event"].is_set():
+                return
+            # Adaptive delay: longer wait after failures (rate-limit recovery)
+            consecutive = WEB_STATUS.get("consecutive_fail", 0)
+            if consecutive >= 2:
+                delay = random.uniform(15, 30)
+            elif consecutive == 1:
+                delay = random.uniform(8, 15)
+            else:
+                delay = random.uniform(4, 10)
+            await asyncio.sleep(delay)
             if JOB["event"].is_set():
                 return
             full_name = generate_full_name()
@@ -1894,22 +1988,32 @@ async def web_run_batch(count):
                 temp_email, otp_token = await create_temp_inbox()
                 if not temp_email:
                     WEB_STATUS["failed"] += 1
+                    WEB_STATUS["consecutive_fail"] = WEB_STATUS.get("consecutive_fail", 0) + 1
                     WEB_STATUS["errors"].append(f"{email}: temp inbox unavailable")
                     WEB_STATUS["done"] += 1
                     return
                 email = temp_email
             success, message, final_email, final_phone = await signup_on_website(
-                full_name, phone, email, password, otp_token=otp_token)
+                full_name, phone, email, password, otp_token=otp_token,
+                stop_event=JOB["event"])
             if success:
                 users[final_email] = {
                     "full_name": full_name, "username": username,
                     "phone": final_phone, "password": password, "status": "active"
                 }
                 WEB_STATUS["created"].append(final_email)
+                WEB_STATUS["consecutive_fail"] = 0
                 save_users(users)
             else:
                 WEB_STATUS["failed"] += 1
+                WEB_STATUS["consecutive_fail"] = WEB_STATUS.get("consecutive_fail", 0) + 1
                 WEB_STATUS["errors"].append(f"{final_email}: {message}")
+                # Site is blocking us — stop the whole batch immediately
+                if message.startswith("BLOCKED") or message.startswith("RATE-LIMITED"):
+                    JOB["event"].set()
+                elif WEB_STATUS["consecutive_fail"] >= 4 and ("Form fields not found" in message or "RATE-LIMITED" in message):
+                    JOB["event"].set()
+                    WEB_STATUS["errors"].append("⚠️ Rate-limited (4+ failures in a row) — batch stopped automatically")
             WEB_STATUS["done"] += 1
     
     try:
