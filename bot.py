@@ -1,4 +1,4 @@
-BOT_VERSION = "5.10"
+BOT_VERSION = "5.11"
 
 import os
 import re
@@ -357,16 +357,31 @@ DETECT_FORM_JS = """
       }
     }
   });
-  // submit/next button
+  // submit/next button — broader patterns (from sentri/buttonmash waterfall)
   let submit = "";
-  const btns = [...document.querySelectorAll("button, input[type=submit], a[role=button], .submit")];
+  const SUBMIT_HINTS = ["create account", "sign up", "signup", "register", "submit",
+    "next", "continue", "proceed", "get started", "join", "start",
+    "continue with", "finish", "done", "confirm", "save", "apply",
+    "next step", "create my account"];
+  const btns = [...document.querySelectorAll(
+    "button, input[type=submit], a[role=button], [role=button], .submit, a[href='#']"
+  )];
   for (const b of btns) {
+    if (b.offsetParent === null) continue; // hidden
     const t = ((b.innerText || b.value || "") + " " + (b.className || "") + " " + (b.id || "")).toLowerCase();
-    if (t.includes("create account") || t.includes("sign up") || t.includes("register") || t.includes("submit") || t.includes("next") || t.includes("continue") || t.includes("proceed") || b.id === "submitbtn" || (b.className && b.className.includes("submit"))) {
-      submit = b.id ? "#" + b.id : (b.className && b.className.includes("submit") ? "." + b.className.trim().split(/\\s+/)[0] : "");
-      if (!submit && b.tagName === "BUTTON") submit = "button[type=submit]";
+    if (SUBMIT_HINTS.some(h => t.includes(h))) {
+      if (b.id) submit = "#" + b.id;
+      else if (b.className && /submit|next|continue/i.test(b.className))
+        submit = b.tagName.toLowerCase() + "." + b.className.trim().split(/\\s+/)[0];
+      else if (b.tagName === "BUTTON") submit = "button";
+      else submit = "[role=button]";
       break;
     }
+  }
+  if (!submit) {
+    // Any type=submit, else last non-cancel button in the form
+    const native = document.querySelector('button[type="submit"], input[type="submit"]');
+    if (native) submit = native.tagName === "BUTTON" ? 'button[type="submit"]' : 'input[type="submit"]';
   }
   if (!submit) submit = "button[type=submit], .submit, button";
   return { fields, submit };
@@ -416,6 +431,87 @@ OTP_DETECT_JS = """
 async def detect_form(page):
     """Detect form fields in the open page. Returns {fields:{...}, submit:str}."""
     return await page.evaluate(DETECT_FORM_JS)
+
+GEMINI_FORM_PROMPT = """You are a signup-form analyzer. Given the HTML of a web page, find the registration/signup form fields and the submit/next button.
+
+Return ONLY valid JSON, no markdown, in this exact shape:
+{
+  "fields": {
+    "name": "<css selector for full name input>",
+    "phone": "<css selector for phone input>",
+    "email": "<css selector for email input>",
+    "password": "<css selector for password input>",
+    "referral": "<css selector for referral/invite code input, or omit>"
+  },
+  "submit": "<css selector for the submit/next/register button>"
+}
+
+Rules:
+- Use #id if the element has an id, otherwise tag[name="value"] or tag[placeholder="..."]
+- Only include fields that actually exist in the HTML
+- Skip hidden inputs, checkboxes, radio buttons, file inputs
+- The submit button should be the primary action (Sign Up, Register, Create Account, Next, Continue)
+- If no form exists, return {"fields": {}, "submit": ""}
+- Output raw JSON only"""
+
+async def gemini_detect_form(page):
+    """AI fallback: ask Gemini to find form fields when keyword detection fails.
+    Returns same shape as detect_form, or None on any failure."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        # Compact HTML: strip scripts/styles to stay under token limits
+        html = await page.evaluate("""() => {
+            const clone = document.documentElement.cloneNode(true);
+            clone.querySelectorAll('script, style, noscript, svg, iframe').forEach(e => e.remove());
+            return clone.outerHTML;
+        }""")
+        if len(html) > 30000:
+            html = html[:30000]
+        
+        def _call():
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
+                json={
+                    "contents": [{
+                        "parts": [{
+                            "text": GEMINI_FORM_PROMPT + "\n\nHTML:\n" + html
+                        }]
+                    }],
+                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024}
+                },
+                timeout=30
+            )
+            if r.status_code != 200:
+                logger.error(f"Gemini API {r.status_code}: {r.text[:200]}")
+                return None
+            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            # Strip markdown fences if present
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.M)
+            data = json.loads(text)
+            if not isinstance(data, dict) or "fields" not in data:
+                return None
+            # Sanity: every selector must be a non-empty string
+            fields = {k: v for k, v in (data.get("fields") or {}).items() if isinstance(v, str) and v.strip()}
+            submit = data.get("submit") if isinstance(data.get("submit"), str) else ""
+            return {"fields": fields, "submit": submit}
+        
+        result = await asyncio.get_event_loop().run_in_executor(None, _call)
+        if result and result.get("fields"):
+            logger.info(f"Gemini AI detected fields: {list(result['fields'].keys())}")
+        return result
+    except Exception as e:
+        logger.error(f"gemini_detect_form error: {e}")
+        return None
+
+async def detect_form_smart(page, force_ai=False):
+    """Keyword detection first; Gemini AI fallback if weak or forced."""
+    mapping = await detect_form(page)
+    if force_ai or len(mapping.get("fields", {})) < 2:
+        ai = await gemini_detect_form(page)
+        if ai and len(ai.get("fields", {})) >= len(mapping.get("fields", {})):
+            return ai
+    return mapping
 
 def mapping_report(mapping):
     """Human-readable report of a detected mapping."""
@@ -482,6 +578,12 @@ async def learn_form(url):
         # Wait through loading animations for the real form
         mapping = await wait_for_form_ready(page, timeout_ms=20000)
         
+        # AI fallback if keyword detection was weak
+        if len(mapping.get("fields", {})) < 2:
+            ai_map = await gemini_detect_form(page)
+            if ai_map and len(ai_map.get("fields", {})) >= len(mapping.get("fields", {})):
+                mapping = ai_map
+        
         shot = None
         try:
             shot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "learn_shot.png")
@@ -521,6 +623,106 @@ async def request_otp(bot, chat_id, screenshot_path=None, url=""):
         return None
     finally:
         OTP_WAIT.pop(chat_id, None)
+
+async def _try_click(page, locator, timeout=2000):
+    """Wait for locator to be visible then click. Returns True on success."""
+    try:
+        await locator.wait_for(state="visible", timeout=timeout)
+        await locator.click(timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+async def click_submit(page, submit_sel=None):
+    """Robust submit/Next button click — waterfall of strategies from top
+    automation repos (sentri, buttonmash, playwright best-practices).
+    Returns True if a click/submit was triggered."""
+    # 1. Learned selector (if any)
+    if submit_sel:
+        try:
+            if await _try_click(page, page.locator(submit_sel).first, timeout=1500):
+                return True
+        except Exception:
+            pass
+    
+    # 2. Semantic role + text (most reliable per Playwright docs)
+    text_pattern = (
+        r"sign\s*up|register|create\s*(account|my\s*account|profile)?|"
+        r"next|continue|proceed|submit|get\s*started|join|start|"
+        r"continue\s*with|finish|done|confirm|save|apply|"
+        r"next\s*step|continue\s*to|proceed\s*to"
+    )
+    try:
+        if await _try_click(page, page.get_by_role("button", name=re.compile(text_pattern, re.I)).first):
+            return True
+    except Exception:
+        pass
+    try:
+        if await _try_click(page, page.get_by_role("link", name=re.compile(text_pattern, re.I)).first, timeout=1000):
+            return True
+    except Exception:
+        pass
+    
+    # 3. Native submit buttons + class/id hints
+    for sel in (
+        'button[type="submit"]', 'input[type="submit"]',
+        'button:not([type])', 'input[type="image"]',
+        'button[class*="submit" i]', 'button[class*="next" i]',
+        'button[class*="continue" i]', 'button[id*="submit" i]',
+        'button[id*="next" i]', 'a[class*="submit" i]',
+        '[role="button"][class*="submit" i]',
+        '[role="button"][class*="next" i]',
+    ):
+        if await _try_click(page, page.locator(sel).first, timeout=1000):
+            return True
+    
+    # 4. Any button whose visible text matches (covers React/Vue buttons)
+    try:
+        el = page.locator("button, a[role=button], [role=button]").filter(
+            has_text=re.compile(text_pattern, re.I)
+        ).first
+        if await _try_click(page, el, timeout=1000):
+            return True
+    except Exception:
+        pass
+    
+    # 5. Any button inside the same <form> as our filled fields
+    try:
+        el = page.locator("form button:not([type='button']):not([type='reset'])").last
+        if await _try_click(page, el, timeout=1000):
+            return True
+    except Exception:
+        pass
+    
+    # 6. JS form.requestSubmit() — fires native validation + page's own handlers
+    #    (pattern from web-search-neo complex-forms docs)
+    try:
+        triggered = await page.evaluate("""() => {
+            const forms = [...document.querySelectorAll('form')];
+            let form = forms.find(f => f.querySelector('input[type="email"], input[name*="email" i], input[name*="name" i]'));
+            if (!form) form = forms[forms.length - 1];
+            if (form) {
+                if (form.requestSubmit) { form.requestSubmit(); return true; }
+                form.submit(); return true;
+            }
+            const btns = [...document.querySelectorAll('button, [role="button"]')];
+            const b = btns.find(x => x.offsetParent !== null && !/cancel|back|close|skip/i.test(x.textContent));
+            if (b) { b.click(); return true; }
+            return false;
+        }""")
+        if triggered:
+            return True
+    except Exception:
+        pass
+    
+    # 7. Last resort: Enter key (browsers submit the enclosing form natively)
+    try:
+        await page.keyboard.press("Enter")
+        return True
+    except Exception:
+        pass
+    
+    return False
 
 async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                             otp_chat_id=None, bot=None, otp_token=None):
@@ -565,15 +767,31 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                     fields = mapping.get("fields", {})
                     submit_sel = mapping.get("submit", "#submitBtn")
                     
+                    # Weak detection? Ask Gemini AI as fallback
+                    if len(fields) < 2:
+                        ai_map = await gemini_detect_form(page)
+                        if ai_map and len(ai_map.get("fields", {})) >= 2:
+                            mapping = ai_map
+                            fields = mapping.get("fields", {})
+                            submit_sel = mapping.get("submit", submit_sel)
+                    
                     if step == 0 and not (fields.get("name") or fields.get("username")):
-                        try:
-                            title = await page.title()
-                            body_text = (await page.inner_text("body"))[:300]
-                            last_error = f"Form fields not found. Page title: '{title}'. Body: {body_text}"
-                        except Exception:
-                            last_error = "Form fields not found and page unreadable"
-                        attempt_failed = True
-                        break
+                        # One more shot: maybe the page needs a moment, then AI
+                        await page.wait_for_timeout(2000)
+                        ai_map = await gemini_detect_form(page)
+                        if ai_map and (ai_map.get("fields", {}).get("name") or ai_map.get("fields", {}).get("username")):
+                            mapping = ai_map
+                            fields = mapping.get("fields", {})
+                            submit_sel = mapping.get("submit", submit_sel)
+                        else:
+                            try:
+                                title = await page.title()
+                                body_text = (await page.inner_text("body"))[:300]
+                                last_error = f"Form fields not found. Page title: '{title}'. Body: {body_text}"
+                            except Exception:
+                                last_error = "Form fields not found and page unreadable"
+                            attempt_failed = True
+                            break
                     
                     # Fill every field this step exposes
                     for field, selector in fields.items():
@@ -593,17 +811,8 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                     
                     await page.wait_for_timeout(500)
                     
-                    # Click Next / Continue / Submit (whichever exists)
-                    clicked = False
-                    for sel in (submit_sel, "button:has-text('Next')", "button:has-text('Continue')",
-                                "button:has-text('Proceed')", "button:has-text('Next Step')",
-                                "input[type=submit]"):
-                        try:
-                            await page.click(sel, timeout=3000)
-                            clicked = True
-                            break
-                        except Exception:
-                            continue
+                    # Click Next / Continue / Submit — robust waterfall
+                    clicked = await click_submit(page, submit_sel)
                     if not clicked:
                         last_error = f"Step {step + 1}: no Next/Submit button found"
                         attempt_failed = True
@@ -637,9 +846,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                                         continue
                             else:
                                 await page.fill(otp_sel, code)
-                            try:
-                                await page.click(submit_sel)
-                            except Exception:
+                            if not await click_submit(page, submit_sel):
                                 await page.keyboard.press("Enter")
                             await page.wait_for_timeout(5000)
                         except Exception as e:
@@ -669,9 +876,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
                                         continue
                             else:
                                 await page.fill(otp_sel, code)
-                            try:
-                                await page.click(submit_sel)
-                            except Exception:
+                            if not await click_submit(page, submit_sel):
                                 await page.keyboard.press("Enter")
                             await page.wait_for_timeout(5000)
                         except Exception as e:
