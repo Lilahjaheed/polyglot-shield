@@ -1,4 +1,4 @@
-BOT_VERSION = "4.5"
+BOT_VERSION = "4.6"
 
 import os
 import re
@@ -110,13 +110,25 @@ def generate_password():
     length = random.randint(10, 14)
     return "".join(random.choice(chars) for _ in range(length))
 
+def generate_unique_name():
+    """Generate email not already used by a created account."""
+    for _ in range(50):
+        username, email = generate_matching_name()
+        if email not in users:
+            return username, email
+    # Fallback: append random digits
+    username, email = generate_matching_name()
+    local, domain = email.split("@")
+    return username, f"{local}{random.randint(100, 999)}@{domain}"
+
 async def signup_on_website(full_name, phone, email, password, max_attempts=3):
     last_error = "Unknown error"
     for attempt in range(max_attempts):
         # Fresh data each attempt
         if attempt > 0:
             phone = generate_phone()
-            _, email = generate_matching_name()
+            _, email = generate_unique_name()
+        browser = None
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
@@ -128,10 +140,15 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3):
                 )
                 page = await context.new_page()
                 
-                await page.goto(WEBSITE_URL, timeout=60000, wait_until="networkidle")
-                await page.wait_for_timeout(2000)
+                # domcontentloaded is reliable; networkidle hangs on analytics beacons
+                await page.goto(WEBSITE_URL, timeout=45000, wait_until="domcontentloaded")
                 
-                await page.wait_for_selector("#name", timeout=30000)
+                try:
+                    await page.wait_for_selector("#name", timeout=20000)
+                except Exception:
+                    # Form not there yet - reload once and wait again
+                    await page.reload(timeout=45000, wait_until="domcontentloaded")
+                    await page.wait_for_selector("#name", timeout=20000)
                 
                 await page.fill("#name", full_name)
                 await page.fill("#phone", phone)
@@ -146,6 +163,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3):
                 page_content = await page.content()
                 current_url = page.url
                 await browser.close()
+                browser = None
                 
                 # Success: redirected away from register page
                 if "register" not in current_url.lower():
@@ -164,6 +182,15 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3):
                 last_error = "No redirect, no error box (page may have changed)"
         except Exception as e:
             last_error = f"Error: {str(e)}"
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+        # Brief pause between retries so parallel workers don't hammer the site
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(3)
     
     return False, last_error, email, phone
 
@@ -275,7 +302,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 full_name = generate_full_name()
                 phone = generate_phone()
-                username, email = generate_matching_name()
+                username, email = generate_unique_name()
                 password = generate_password()
                 
                 success, message, final_email, final_phone = await signup_on_website(full_name, phone, email, password)
@@ -401,7 +428,7 @@ async def new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     full_name = generate_full_name()
     phone = generate_phone()
-    username, email = generate_matching_name()
+    username, email = generate_unique_name()
     password = generate_password()
     
     success, message, final_email, final_phone = await signup_on_website(full_name, phone, email, password)
