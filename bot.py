@@ -195,8 +195,10 @@ def ensure_chromium():
 
 async def launch_chromium(p):
     """Launch headless Chromium with retry on ETXTBSY (binary busy)."""
-    args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled"]
+    args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    if BROWSER_ENGINE != "patchright":
+        # patchright handles anti-detection itself; these flags can hurt it
+        args.append("--disable-blink-features=AutomationControlled")
     last_err = None
     for i in range(4):
         try:
