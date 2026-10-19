@@ -1,4 +1,4 @@
-BOT_VERSION = "4.6"
+BOT_VERSION = "4.7"
 
 import os
 import re
@@ -133,10 +133,19 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3):
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                    args=[
+                        "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled"
+                    ]
                 )
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1366, "height": 768},
+                    locale="en-US"
+                )
+                # Hide automation flags from the site
+                await context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
                 )
                 page = await context.new_page()
                 
@@ -144,11 +153,21 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3):
                 await page.goto(WEBSITE_URL, timeout=45000, wait_until="domcontentloaded")
                 
                 try:
-                    await page.wait_for_selector("#name", timeout=20000)
+                    await page.wait_for_selector("#name", state="attached", timeout=30000)
                 except Exception:
-                    # Form not there yet - reload once and wait again
-                    await page.reload(timeout=45000, wait_until="domcontentloaded")
-                    await page.wait_for_selector("#name", timeout=20000)
+                    # Form not there - reload once and wait again
+                    try:
+                        await page.reload(timeout=45000, wait_until="domcontentloaded")
+                        await page.wait_for_selector("#name", state="attached", timeout=30000)
+                    except Exception:
+                        # Diagnostic: what did the browser actually see?
+                        try:
+                            title = await page.title()
+                            body_text = (await page.inner_text("body"))[:300]
+                            last_error = f"Form not found. Page title: '{title}'. Body: {body_text}"
+                        except Exception:
+                            last_error = "Form not found and page unreadable"
+                        continue
                 
                 await page.fill("#name", full_name)
                 await page.fill("#phone", phone)
