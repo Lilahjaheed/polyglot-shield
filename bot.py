@@ -1,4 +1,4 @@
-BOT_VERSION = "5.6"
+BOT_VERSION = "5.7"
 
 import os
 import re
@@ -712,6 +712,54 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
     
     return False, last_error, email, phone
 
+def main_menu_keyboard():
+    """Main menu with color-coded emoji buttons (🟢 go/on, 🔴 off, 🟡 config)."""
+    return [
+        [
+            InlineKeyboardButton("🟢 1 Account", callback_data="create_1"),
+            InlineKeyboardButton("🟢 5 Accounts", callback_data="create_5"),
+        ],
+        [
+            InlineKeyboardButton("🟢 10 Accounts", callback_data="create_10"),
+            InlineKeyboardButton("🟢 20 Accounts", callback_data="create_20"),
+        ],
+        [
+            InlineKeyboardButton("🟢 50 Accounts", callback_data="create_50"),
+            InlineKeyboardButton("🟢 100 Accounts", callback_data="create_100"),
+        ],
+        [
+            InlineKeyboardButton("📋 View Accounts", callback_data="view_accounts"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="show_settings"),
+        ],
+        [
+            InlineKeyboardButton("🟡 Set URL", callback_data="ask_url"),
+            InlineKeyboardButton("🟡 Set Email", callback_data="ask_email"),
+        ],
+        [
+            InlineKeyboardButton("🟡 Learn Form", callback_data="ask_learn"),
+            InlineKeyboardButton(f"🌍 {REGIONS.get(ACTIVE_REGION, REGIONS['nigeria'])['label']}", callback_data="ask_region"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'🟢 Auto-OTP: ON' if AUTO_OTP else '🔴 Auto-OTP: OFF'}",
+                callback_data="toggle_auto_otp"
+            ),
+        ],
+    ]
+
+def main_menu_text():
+    status_on = "🟢 *ON* — I create a temp email & read codes automatically"
+    status_off = "🔴 *OFF* — I use your email & ask you for codes"
+    return (
+        f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
+        f"Website: {WEBSITE_URL}\n"
+        f"Accounts created: {len(users)}\n"
+        f"Auto-OTP: {status_on if AUTO_OTP else status_off}\n"
+        f"Browser: {BROWSER_ENGINE}\n\n"
+        f"🟢 = create accounts\n🟡 = settings to change\n\n"
+        f"Select how many accounts to create:"
+    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
         await update.message.reply_text("⛔ Access denied.")
@@ -720,93 +768,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Cancel any waiting input (url/email/OTP prompt)
     PENDING_INPUT.pop(update.message.chat_id, None)
     
-    keyboard = [
-        [
-            InlineKeyboardButton("1 Account", callback_data="create_1"),
-            InlineKeyboardButton("5 Accounts", callback_data="create_5"),
-        ],
-        [
-            InlineKeyboardButton("10 Accounts", callback_data="create_10"),
-            InlineKeyboardButton("20 Accounts", callback_data="create_20"),
-        ],
-        [
-            InlineKeyboardButton("50 Accounts", callback_data="create_50"),
-            InlineKeyboardButton("100 Accounts", callback_data="create_100"),
-        ],
-        [
-            InlineKeyboardButton("📋 View Accounts", callback_data="view_accounts"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="show_settings"),
-        ],
-        [
-            InlineKeyboardButton("🔗 Set URL", callback_data="ask_url"),
-            InlineKeyboardButton("✉️ Set Email", callback_data="ask_email"),
-        ],
-        [
-            InlineKeyboardButton("🔍 Learn Form", callback_data="ask_learn"),
-            InlineKeyboardButton(f"🌍 Region: {REGIONS.get(ACTIVE_REGION, REGIONS['nigeria'])['label']}", callback_data="ask_region"),
-        ],
-        [
-            InlineKeyboardButton(
-                f"🤖 Auto-OTP: {'ON ✅' if AUTO_OTP else 'OFF'}",
-                callback_data="toggle_auto_otp"
-            ),
-        ],
-    ]
-    
     await update.message.reply_text(
-        f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
-        f"Website: readersbuck.com\n"
-        f"Accounts created: {len(users)}\n"
-        f"Auto-OTP: {'ON 🤖' if AUTO_OTP else 'OFF (ask me)'}\n"
-        f"Browser: {BROWSER_ENGINE}\n\n"
-        f"Select how many accounts to create:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        main_menu_text(),
+        reply_markup=InlineKeyboardMarkup(main_menu_keyboard()),
         parse_mode="Markdown"
     )
 
 async def start_from_callback(query):
     """Re-render the main menu from a callback query."""
     PENDING_INPUT.pop(query.message.chat_id, None)
-    keyboard = [
-        [
-            InlineKeyboardButton("1 Account", callback_data="create_1"),
-            InlineKeyboardButton("5 Accounts", callback_data="create_5"),
-        ],
-        [
-            InlineKeyboardButton("10 Accounts", callback_data="create_10"),
-            InlineKeyboardButton("20 Accounts", callback_data="create_20"),
-        ],
-        [
-            InlineKeyboardButton("50 Accounts", callback_data="create_50"),
-            InlineKeyboardButton("100 Accounts", callback_data="create_100"),
-        ],
-        [
-            InlineKeyboardButton("📋 View Accounts", callback_data="view_accounts"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="show_settings"),
-        ],
-        [
-            InlineKeyboardButton("🔗 Set URL", callback_data="ask_url"),
-            InlineKeyboardButton("✉️ Set Email", callback_data="ask_email"),
-        ],
-        [
-            InlineKeyboardButton("🔍 Learn Form", callback_data="ask_learn"),
-            InlineKeyboardButton(f"🌍 Region: {REGIONS.get(ACTIVE_REGION, REGIONS['nigeria'])['label']}", callback_data="ask_region"),
-        ],
-        [
-            InlineKeyboardButton(
-                f"🤖 Auto-OTP: {'ON ✅' if AUTO_OTP else 'OFF'}",
-                callback_data="toggle_auto_otp"
-            ),
-        ],
-    ]
     await query.edit_message_text(
-        f"🤖 *Signup Bot v{BOT_VERSION}*\n\n"
-        f"Website: {WEBSITE_URL}\n"
-        f"Accounts created: {len(users)}\n"
-        f"Auto-OTP: {'ON 🤖' if AUTO_OTP else 'OFF (ask me)'}\n"
-        f"Browser: {BROWSER_ENGINE}\n\n"
-        f"Select how many accounts to create:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        main_menu_text(),
+        reply_markup=InlineKeyboardMarkup(main_menu_keyboard()),
         parse_mode="Markdown"
     )
 
@@ -963,22 +936,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(CONFIG_PATH, "w") as f:
             json.dump(config, f, indent=2)
         if AUTO_OTP:
-            await query.answer("Auto-OTP ON — temp email + automatic code reading")
+            await query.answer("🟢 Auto-OTP ON — temp email + automatic code reading")
             await query.edit_message_text(
-                "🤖 *Auto-OTP: ON*\n\n"
+                "🟢 *Auto-OTP: ON*\n\n"
                 "I'll create a real temp email (mail.tm) for each account\n"
                 "and read the verification code automatically.\n"
                 "No action needed from you.\n\n"
-                "Use /start to go back.",
+                "Tap 🟢 below to go back.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("« Back to menu", callback_data="back_to_menu")]]
+                ),
                 parse_mode="Markdown"
             )
         else:
-            await query.answer("Auto-OTP OFF — I'll ask you for codes")
+            await query.answer("🔴 Auto-OTP OFF — I'll ask you for codes")
             await query.edit_message_text(
-                "🤖 *Auto-OTP: OFF*\n\n"
-                "I'll use your own email (via /setemail) or a random one.\n"
+                "🔴 *Auto-OTP: OFF*\n\n"
+                "I'll use your own email (via Set Email) or a random one.\n"
                 "If the site asks for a code, I'll send it to you here.\n\n"
-                "Use /start to go back.",
+                "Tap below to go back.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("« Back to menu", callback_data="back_to_menu")]]
+                ),
                 parse_mode="Markdown"
             )
         return
