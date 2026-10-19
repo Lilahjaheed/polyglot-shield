@@ -1,4 +1,4 @@
-BOT_VERSION = "5.1"
+BOT_VERSION = "5.2"
 
 import os
 import re
@@ -56,17 +56,50 @@ JOB = {"active": False, "event": None}
 # Pending OTP requests: chat_id -> asyncio.Future resolved when owner sends the code
 OTP_WAIT = {}
 
+def chromium_ready():
+    """Check if Playwright's Chromium binary already exists."""
+    cache = os.environ.get("PLAYWRIGHT_BROWSERS_PATH",
+                           os.path.expanduser("~/.cache/ms-playwright"))
+    if not os.path.isdir(cache):
+        return False
+    for entry in os.listdir(cache):
+        if entry.startswith("chromium"):
+            for exe in ("chrome-linux/chrome", "chrome-linux/headless_shell",
+                        "chrome-headless-shell-linux64/chrome-headless-shell"):
+                if os.path.exists(os.path.join(cache, entry, exe)):
+                    return True
+    return False
+
 def ensure_chromium():
-    """Make sure Chromium is installed."""
+    """Install Chromium only if missing (build usually does this already)."""
+    if chromium_ready():
+        logger.info("Chromium already present - skipping install")
+        return
     try:
         subprocess.run(
             ["python", "-m", "playwright", "install", "chromium"],
             capture_output=True,
-            timeout=120
+            timeout=300
         )
-        logger.info("Chromium ensured")
+        logger.info("Chromium installed")
     except Exception as e:
         logger.error(f"Chromium install error: {e}")
+
+async def launch_chromium(p):
+    """Launch headless Chromium with retry on ETXTBSY (binary busy)."""
+    args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled"]
+    last_err = None
+    for i in range(4):
+        try:
+            return await p.chromium.launch(headless=True, args=args)
+        except Exception as e:
+            last_err = e
+            if "ETXTBSY" in str(e) and i < 3:
+                await asyncio.sleep(5)
+                continue
+            raise
+    raise last_err
 
 def generate_full_name():
     return random.choice(NAME_POOL)
@@ -246,11 +279,7 @@ async def learn_form(url):
     """Visit url, screenshot the page, detect the signup form.
     Returns (screenshot_path_or_None, mapping, error_or_None)."""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"]
-        )
+        browser = await launch_chromium(p)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1366, "height": 900}, locale="en-US"
@@ -317,13 +346,7 @@ async def signup_on_website(full_name, phone, email, password, max_attempts=3,
         browser = None
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                        "--disable-blink-features=AutomationControlled"
-                    ]
-                )
+                browser = await launch_chromium(p)
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1366, "height": 768},
@@ -760,10 +783,7 @@ async def test_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
-            )
+            browser = await launch_chromium(p)
             page = await browser.new_page()
             await page.goto(WEBSITE_URL, timeout=15000)
             title = await page.title()
