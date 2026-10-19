@@ -1,4 +1,4 @@
-BOT_VERSION = "5.3"
+BOT_VERSION = "5.4"
 
 import os
 import re
@@ -55,6 +55,9 @@ JOB = {"active": False, "event": None}
 
 # Pending OTP requests: chat_id -> asyncio.Future resolved when owner sends the code
 OTP_WAIT = {}
+
+# Waiting for the owner to type a value (url/email): chat_id -> "url" | "email"
+PENDING_INPUT = {}
 
 def chromium_ready():
     """Check if Playwright's Chromium binary already exists."""
@@ -546,6 +549,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Access denied.")
         return
     
+    # Cancel any waiting input (url/email/OTP prompt)
+    PENDING_INPUT.pop(update.message.chat_id, None)
+    
     keyboard = [
         [
             InlineKeyboardButton("1 Account", callback_data="create_1"),
@@ -562,6 +568,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("📋 View Accounts", callback_data="view_accounts"),
             InlineKeyboardButton("⚙️ Settings", callback_data="show_settings"),
+        ],
+        [
+            InlineKeyboardButton("🔗 Set URL", callback_data="ask_url"),
+            InlineKeyboardButton("✉️ Set Email", callback_data="ask_email"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Learn Form", callback_data="ask_learn"),
         ],
     ]
     
@@ -707,6 +720,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.message.reply_text(re.sub(r'\\[*_`\[\]]', '', result))
                 except Exception:
                     pass
+    
+    elif data == "ask_learn":
+        PENDING_INPUT[query.message.chat_id] = "learn_url"
+        await query.edit_message_text(
+            "🔍 *Send me the page to learn*\n\n"
+            "Type/paste the signup page URL in your next message.\n"
+            "I'll screenshot it, detect the form, and save the mapping.\n\n"
+            "Or send `here` to learn the current URL:\n"
+            f"`{WEBSITE_URL}`\n\n"
+            "(Send /start to cancel)",
+            parse_mode="Markdown"
+        )
+        return
+    
+    elif data == "ask_url":
+        PENDING_INPUT[query.message.chat_id] = "url"
+        await query.edit_message_text(
+            "🔗 *Send me the new URL*\n\n"
+            "Just type/paste the signup page link in your next message.\n"
+            "Example: `https://example.com/register`\n\n"
+            "(Send /start to cancel)",
+            parse_mode="Markdown"
+        )
+        return
+    
+    elif data == "ask_email":
+        PENDING_INPUT[query.message.chat_id] = "email"
+        await query.edit_message_text(
+            "✉️ *Send me the email*\n\n"
+            "Type the email to use for signups in your next message.\n"
+            "Example: `you@gmail.com`\n\n"
+            "Send the word `off` to go back to random emails.\n"
+            "(Send /start to cancel)",
+            parse_mode="Markdown"
+        )
+        return
     
     elif data == "stop_job":
         if JOB.get("event") and not JOB["event"].is_set():
@@ -914,18 +963,93 @@ async def set_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Back to random auto-generated emails.")
 
 async def otp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catch the OTP code the owner sends while a signup is waiting."""
+    """Handle plain text: pending URL/email input, then OTP codes."""
     if update.message.from_user.id != OWNER_ID:
         return
-    fut = OTP_WAIT.get(update.message.chat_id)
+    
+    chat_id = update.message.chat_id
+    text = update.message.text.strip()
+    
+    # 1) Waiting for a URL or email (button flow - no slash needed)
+    pending = PENDING_INPUT.get(chat_id)
+    if pending:
+        PENDING_INPUT.pop(chat_id, None)
+        global WEBSITE_URL, OVERRIDE_EMAIL
+        if pending == "learn_url":
+            url = WEBSITE_URL if text.lower() == "here" else text
+            if not url.startswith("http"):
+                await update.message.reply_text("❌ Send a URL (or `here`). /start to cancel.", parse_mode="Markdown")
+                return
+            await update.message.reply_text(
+                f"🔍 *Learning form...*\n\nVisiting:\n`{url}`", parse_mode="Markdown")
+            try:
+                shot, mapping, error = await learn_form(url)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Failed to open page: {str(e)}")
+                return
+            if shot and os.path.exists(shot):
+                try:
+                    with open(shot, "rb") as photo:
+                        await update.message.reply_photo(photo, caption=f"📸 What the bot sees:\n{url}")
+                except Exception:
+                    pass
+            if error and not mapping.get("fields"):
+                await update.message.reply_text(f"❌ *Learn failed*\n\n{error}", parse_mode="Markdown")
+                return
+            report = mapping_report(mapping)
+            detected = len(mapping.get("fields", {}))
+            if detected >= 3:
+                data = load_learned()
+                data[url] = mapping
+                save_learned(data)
+                await update.message.reply_text(
+                    f"✅ *Form learned!*\n\nDetected {detected}/5 fields:\n{report}\n\nSaved. Signups on this URL will use these selectors.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    f"⚠️ *Weak detection*\n\n{report}\n\nOnly {detected} fields found — not saved.",
+                    parse_mode="Markdown"
+                )
+            return
+        if pending == "url":
+            if not text.startswith("http"):
+                await update.message.reply_text("❌ That doesn't look like a URL. Send /start and tap 🔗 Set URL again.")
+                return
+            WEBSITE_URL = text
+            config["website_url"] = WEBSITE_URL
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            await update.message.reply_text(
+                f"✅ URL saved:\n`{WEBSITE_URL}`\n\n"
+                f"Tip: tap 🔍 Learn on /start (or send /learn) to auto-detect the form.",
+                parse_mode="Markdown"
+            )
+        elif pending == "email":
+            if text.lower() in ("off", "none", "random"):
+                OVERRIDE_EMAIL = ""
+            elif "@" in text and "." in text.split("@")[-1]:
+                OVERRIDE_EMAIL = text
+            else:
+                await update.message.reply_text("❌ Send a valid email (or `off`). /start to cancel.", parse_mode="Markdown")
+                return
+            config["override_email"] = OVERRIDE_EMAIL
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+            if OVERRIDE_EMAIL:
+                await update.message.reply_text(f"✅ Email saved: `{OVERRIDE_EMAIL}`", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("✅ Back to random auto-generated emails.")
+        return
+    
+    # 2) Waiting for an OTP code
+    fut = OTP_WAIT.get(chat_id)
     if fut is None or fut.done():
         return
-    code = update.message.text.strip()
-    # Extract a likely code (4-8 digits or alnum) from casual messages
-    m = re.search(r'\b([A-Za-z0-9]{4,8})\b', code)
-    fut.set_result(m.group(1) if m else code)
+    m = re.search(r'\b([A-Za-z0-9]{4,8})\b', text)
+    fut.set_result(m.group(1) if m else text)
     try:
-        await update.message.reply_text(f"📩 Code received: `{m.group(1) if m else code}` — submitting...", parse_mode="Markdown")
+        await update.message.reply_text(f"📩 Code received: `{m.group(1) if m else text}` — submitting...", parse_mode="Markdown")
     except Exception:
         pass
 
